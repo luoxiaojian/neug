@@ -411,6 +411,6 @@ TEST(DatabaseTest, TestAlterProperty) {
   LOG(INFO) << "Data directory: " << data_dir;
   neug::Workspace ws;
   ws.Open(data_path);
-  auto& ckp = make_checkpoint(ws);
-  neug::testOpenEmptyGraph(ckp, data_dir);
+  auto ckp = make_checkpoint(ws);
+  neug::testOpenEmptyGraph(*ckp, data_dir);
 }

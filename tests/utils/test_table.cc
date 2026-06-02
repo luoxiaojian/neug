@@ -76,11 +76,11 @@ static void OpenTableLegacy(Table& t, Checkpoint& ckp,
                             const std::vector<DataType>& types) {
   t = Table(col_names, types);
   if (!meta.has_module(TablePropKey(0))) {
-    t.Init(ckp, level);
+    t.Init(*ckp, level);
     return;
   }
   ModuleStore store;
-  store.Open(ckp, meta, level);
+  store.Open(*ckp, meta, level);
   for (size_t i = 0; i < types.size(); ++i) {
     t.SetColumn(static_cast<int>(i),
                 std::shared_ptr<ColumnBase>(
@@ -94,7 +94,7 @@ static SnapshotMeta DumpTableLegacy(Table& t, Checkpoint& ckp) {
   SnapshotMeta meta;
   for (size_t i = 0; i < t.col_num(); ++i) {
     meta.set_module(TablePropKey(i),
-                    t.get_column_by_id(i)->Dump(ckp));
+                    t.get_column_by_id(i)->Dump(*ckp));
   }
   return meta;
 }
@@ -135,7 +135,7 @@ class TableTest : public ::testing::Test {
 
 TEST_F(TableTest, TestTableBasic) {
   auto& ws = Workspace();
-  auto& ckp = make_checkpoint(ws);
+  auto ckp = make_checkpoint(ws);
 
   Table disk_table, mem_table, none_table;
 
@@ -152,11 +152,11 @@ TEST_F(TableTest, TestTableBasic) {
       {DataTypeId::kTimestampMs}, {DataTypeId::kInterval},
       {DataTypeId::kVarchar}};
 
-  OpenTableLegacy(disk_table, ckp, SnapshotMeta(),
+  OpenTableLegacy(disk_table, *ckp, SnapshotMeta(),
                   MemoryLevel::kSyncToFile, col_name, property_types);
-  OpenTableLegacy(mem_table, ckp, SnapshotMeta(), MemoryLevel::kInMemory,
+  OpenTableLegacy(mem_table, *ckp, SnapshotMeta(), MemoryLevel::kInMemory,
                   col_name, property_types);
-  OpenTableLegacy(none_table, ckp, SnapshotMeta(), MemoryLevel::kInMemory,
+  OpenTableLegacy(none_table, *ckp, SnapshotMeta(), MemoryLevel::kInMemory,
                   col_name, property_types);
 
   disk_table.resize(10);
@@ -362,11 +362,11 @@ TEST_F(TableTest, TestTableBasic) {
   }
 
   // dump disk_table and reopen it from the descriptor
-  auto disk_desc = DumpTableLegacy(disk_table, ckp);
+  auto disk_desc = DumpTableLegacy(disk_table, *ckp);
   disk_table.close();
   mem_table.close();
 
-  OpenTableLegacy(disk_table, ckp, disk_desc, MemoryLevel::kSyncToFile,
+  OpenTableLegacy(disk_table, *ckp, disk_desc, MemoryLevel::kSyncToFile,
                   col_name, property_types);
   EXPECT_EQ(disk_table.col_num(), 11);
   EXPECT_EQ(disk_table.get_column_by_id(0)->size(), 10);
@@ -378,7 +378,7 @@ TEST_F(TableTest, TestTableBasic) {
   disk_table.close();
 
   // reopen from the same descriptor in-memory
-  OpenTableLegacy(mem_table, ckp, disk_desc, MemoryLevel::kInMemory, col_name,
+  OpenTableLegacy(mem_table, *ckp, disk_desc, MemoryLevel::kInMemory, col_name,
                   property_types);
   EXPECT_EQ(mem_table.col_num(), 11);
   EXPECT_EQ(mem_table.get_column_by_id(0)->size(), 10);
@@ -389,13 +389,13 @@ TEST_F(TableTest, TestTableBasic) {
 }
 
 TEST_F(TableTest, StringColumnDistinguishesUnsetFromEmptyString) {
-  auto& ckp = make_checkpoint(Workspace());
+  auto ckp = make_checkpoint(Workspace());
 
   Table table;
   std::vector<std::string> col_name = {"string_column"};
   std::vector<DataType> property_types = {{DataTypeId::kVarchar}};
 
-  OpenTableLegacy(table, ckp, SnapshotMeta(), MemoryLevel::kInMemory,
+  OpenTableLegacy(table, *ckp, SnapshotMeta(), MemoryLevel::kInMemory,
                   col_name, property_types);
   table.resize(2, {Property::from_string_view("default_value")});
 
@@ -412,9 +412,9 @@ TEST_F(TableTest, StringColumnDistinguishesUnsetFromEmptyString) {
       1, Property::from_string_view("new value new value new value"));
   EXPECT_EQ(string_column->get_prop(1).as_string_view(),
             "new value new value new value");
-  auto desc = string_column->Dump(ckp);
+  auto desc = string_column->Dump(*ckp);
   StringColumn new_string_column;
-  new_string_column.Open(ckp, desc, MemoryLevel::kInMemory);
+  new_string_column.Open(*ckp, desc, MemoryLevel::kInMemory);
   EXPECT_EQ(new_string_column.get_prop(0).as_string_view(), "default_value");
   EXPECT_EQ(new_string_column.get_prop(1).as_string_view(),
             "new value new value new value");

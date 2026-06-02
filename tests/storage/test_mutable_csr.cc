@@ -111,8 +111,8 @@ class MutableCsrTest : public ::testing::Test {
     ws_.Close();
     ws_.Open(TEST_DIR);
 
-    auto& ckp = make_checkpoint(ws_);
-    csr.Open(ckp, ModuleDescriptor(), memory_level);
+    auto ckp = make_checkpoint(ws_);
+    csr.Open(*ckp, ModuleDescriptor(), memory_level);
     csr.resize(src_v_num);
     if constexpr (std::is_same_v<EDATA_T, int32_t>) {
       csr.batch_put_edges(src_vid, dst_vid, int32_data);
@@ -152,8 +152,8 @@ class MutableCsrTest : public ::testing::Test {
     ws_.Close();
     ws_.Open(TEST_DIR);
 
-    auto& ckp = make_checkpoint(ws_);
-    csr.Open(ckp, ModuleDescriptor(), memory_level);
+    auto ckp = make_checkpoint(ws_);
+    csr.Open(*ckp, ModuleDescriptor(), memory_level);
     csr.resize(single_src_v_num);
     if constexpr (std::is_same_v<EDATA_T, int32_t>) {
       csr.batch_put_edges(single_src_vid, dst_vid, int32_data);
@@ -393,14 +393,14 @@ TYPED_TEST(MutableCsrTest, TestBasicFunction) {
 TYPED_TEST(MutableCsrTest, TestDumpAndOpen) {
   MutableCsr<TypeParam> mutable_csr;
   auto& ckp = this->load_csr_data(mutable_csr, MemoryLevel::kInMemory);
-  auto desc = mutable_csr.Dump(ckp);
+  auto desc = mutable_csr.Dump(*ckp);
   MutableCsr<TypeParam> fmap_mutable_csr, memory_mutable_csr,
       hugepage_mutable_csr;
-  fmap_mutable_csr.Open(ckp, desc, MemoryLevel::kSyncToFile);
+  fmap_mutable_csr.Open(*ckp, desc, MemoryLevel::kSyncToFile);
   EXPECT_EQ(fmap_mutable_csr.edge_num(), edge_num);
-  memory_mutable_csr.Open(ckp, desc, MemoryLevel::kInMemory);
+  memory_mutable_csr.Open(*ckp, desc, MemoryLevel::kInMemory);
   EXPECT_EQ(memory_mutable_csr.edge_num(), edge_num);
-  hugepage_mutable_csr.Open(ckp, desc, MemoryLevel::kHugePagePreferred);
+  hugepage_mutable_csr.Open(*ckp, desc, MemoryLevel::kHugePagePreferred);
   EXPECT_EQ(hugepage_mutable_csr.edge_num(), edge_num);
 
   SingleMutableCsr<TypeParam> single_mutable_csr;

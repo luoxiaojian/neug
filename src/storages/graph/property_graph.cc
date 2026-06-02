@@ -246,7 +246,7 @@ void PropertyGraph::Clear() {
   vertex_label_total_count_ = 0;
   edge_label_total_count_ = 0;
   schema_.Clear();
-  ckp_ = nullptr;
+  ckp_.reset();
 }
 
 Status PropertyGraph::EnsureCapacity(label_t v_label, size_t capacity) {
@@ -917,17 +917,18 @@ Status PropertyGraph::BatchDeleteEdges(
   return Status::OK();
 }
 
-void PropertyGraph::Open(Checkpoint& ckp, MemoryLevel memory_level) {
+void PropertyGraph::Open(std::shared_ptr<Checkpoint> ckp,
+                         MemoryLevel memory_level) {
   Clear();
   memory_level_ = memory_level;
 
-  const SnapshotMeta& meta = ckp.GetMeta();
+  const SnapshotMeta& meta = ckp->GetMeta();
   schema_ = meta.GetSchema();
   vertex_label_total_count_ = schema_.vertex_label_frontier();
   edge_label_total_count_ = schema_.edge_label_frontier();
 
   ModuleStore store;
-  store.Open(ckp, memory_level_);
+  store.Open(*ckp, memory_level_);
 
   std::vector<size_t> vertex_capacities(vertex_label_total_count_, 0);
   for (size_t i = 0; i < vertex_label_total_count_; ++i) {
@@ -936,7 +937,7 @@ void PropertyGraph::Open(Checkpoint& ckp, MemoryLevel memory_level) {
       continue;
     }
     vertex_tables_.emplace_back(OpenVertexTable(
-        ckp, schema_.get_vertex_schema(i), store, meta, memory_level_));
+        *ckp, schema_.get_vertex_schema(i), store, meta, memory_level_));
     auto v_size = vertex_tables_[i].Size();
     vertex_tables_[i].EnsureCapacity(v_size < 4096 ? 4096
                                                    : v_size + v_size / 4);
@@ -946,7 +947,8 @@ void PropertyGraph::Open(Checkpoint& ckp, MemoryLevel memory_level) {
   for (const auto& [index, edge_schema] : schema_.get_all_edge_schemas()) {
     auto [src_label_i, dst_label_i, e_label_i] =
         schema_.parse_edge_label(index);
-    EdgeTable et = OpenEdgeTable(ckp, edge_schema, store, meta, memory_level_);
+    EdgeTable et =
+        OpenEdgeTable(*ckp, edge_schema, store, meta, memory_level_);
     auto e_size = et.PropTableSize();
     size_t e_cap = e_size < 4096 ? 4096 : e_size + (e_size + 4) / 5;
     et.EnsureCapacity(vertex_capacities[src_label_i],
@@ -959,10 +961,7 @@ void PropertyGraph::Open(Checkpoint& ckp, MemoryLevel memory_level) {
     v_mutex_[i] = std::make_shared<std::mutex>();
   }
 
-  // NOTE: ckp must outlive this PropertyGraph instance. The caller (NeugDB)
-  // is responsible for ensuring the Checkpoint is not destroyed while the
-  // graph holds a reference to it.
-  ckp_ = &ckp;
+  ckp_ = std::move(ckp);
 }
 
 void PropertyGraph::compact_schema() {

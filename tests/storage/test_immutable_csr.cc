@@ -52,8 +52,8 @@ class IMMutableCsrTest : public ::testing::Test {
   }
 
   Checkpoint& load_csr_data(ImmutableCsr<EDATA_T>& csr) {
-    auto& ckp = make_checkpoint(Workspace());
-    csr.Open(ckp, ModuleDescriptor(), MemoryLevel::kInMemory);
+    auto ckp = make_checkpoint(Workspace());
+    csr.Open(*ckp, ModuleDescriptor(), MemoryLevel::kInMemory);
 
     auto edges = generate_random_edges<EDATA_T>(500, 1000, 10000, false);
     csr.resize(500);
@@ -69,8 +69,8 @@ class IMMutableCsrTest : public ::testing::Test {
   }
 
   Checkpoint& load_single_csr_data(SingleImmutableCsr<EDATA_T>& csr) {
-    auto& ckp = make_checkpoint(Workspace());
-    csr.Open(ckp, ModuleDescriptor(), MemoryLevel::kInMemory);
+    auto ckp = make_checkpoint(Workspace());
+    csr.Open(*ckp, ModuleDescriptor(), MemoryLevel::kInMemory);
 
     auto edges = generate_random_edges<EDATA_T>(500, 1000, 10000, true);
     csr.resize(500);
@@ -279,15 +279,15 @@ TYPED_TEST(IMMutableCsrTest, TestBasicFunction) {
 TYPED_TEST(IMMutableCsrTest, TestDumpAndOpen) {
   ImmutableCsr<TypeParam> immutable_csr;
   auto& ckp = this->load_csr_data(immutable_csr);
-  auto desc = immutable_csr.Dump(ckp);
+  auto desc = immutable_csr.Dump(*ckp);
 
   ImmutableCsr<TypeParam> fmap_immutable_csr, memory_immutable_csr,
       hugepage_immutable_csr;
-  fmap_immutable_csr.Open(ckp, desc, MemoryLevel::kSyncToFile);
+  fmap_immutable_csr.Open(*ckp, desc, MemoryLevel::kSyncToFile);
   EXPECT_EQ(fmap_immutable_csr.edge_num(), 10000);
-  memory_immutable_csr.Open(ckp, desc, MemoryLevel::kInMemory);
+  memory_immutable_csr.Open(*ckp, desc, MemoryLevel::kInMemory);
   EXPECT_EQ(memory_immutable_csr.edge_num(), 10000);
-  hugepage_immutable_csr.Open(ckp, desc, MemoryLevel::kHugePagePreferred);
+  hugepage_immutable_csr.Open(*ckp, desc, MemoryLevel::kHugePagePreferred);
   EXPECT_EQ(hugepage_immutable_csr.edge_num(), 10000);
 
   SingleImmutableCsr<TypeParam> single_immutable_csr;

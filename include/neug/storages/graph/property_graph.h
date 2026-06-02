@@ -125,7 +125,7 @@ class PropertyGraph {
    * VertexTable, EdgeTable) via Module::Open.  If the checkpoint contains no
    * meta the graph starts empty.
    */
-  void Open(Checkpoint& ckp, MemoryLevel memory_level);
+  void Open(std::shared_ptr<Checkpoint> ckp, MemoryLevel memory_level);
 
   void Compact(bool compact_csr, float reserve_ratio, timestamp_t ts);
 
@@ -140,19 +140,21 @@ class PropertyGraph {
    * Convenience overload for callers that don't hold a Checkpoint reference.
    */
   void Dump(bool reopen = true) {
-    assert(ckp_ != nullptr && "ckp_ must be set before calling Dump()");
+    assert(ckp_ && "ckp_ must be set before calling Dump()");
     Dump(*ckp_, reopen);
   }
 
   Checkpoint& checkpoint() {
-    assert(ckp_ != nullptr);
+    assert(ckp_);
     return *ckp_;
   }
 
   const Checkpoint& checkpoint() const {
-    assert(ckp_ != nullptr);
+    assert(ckp_);
     return *ckp_;
   }
+
+  std::shared_ptr<Checkpoint> checkpoint_ptr() const { return ckp_; }
 
   MemoryLevel memory_level() const { return memory_level_; }
 
@@ -598,7 +600,7 @@ class PropertyGraph {
 
   void compact_schema();
 
-  Checkpoint* ckp_;
+  std::shared_ptr<Checkpoint> ckp_;
   Schema schema_;
   std::vector<std::shared_ptr<std::mutex>> v_mutex_;
   std::vector<VertexTable> vertex_tables_;
