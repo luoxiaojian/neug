@@ -28,9 +28,7 @@
 #include <utility>
 
 #include "neug/storages/graph/schema.h"
-#include "neug/storages/module/module_factory.h"
 #include "neug/storages/module/module_store.h"
-#include "neug/storages/module/type_name.h"
 #include "neug/storages/snapshot_meta.h"
 #include "neug/storages/workspace.h"
 #include "neug/utils/exception/exception.h"
@@ -41,191 +39,6 @@
 #include "neug/utils/yaml_utils.h"
 
 namespace neug {
-
-namespace {
-
-// Flat SnapshotMeta key builders.  Modules go in `meta.modules()` under
-// `vertex_<label>_<leaf>` / `edge_<src>_<edge>_<dst>_<leaf>`; scalars live
-// in `meta.scalars()` under `<owner>/<field>`.
-std::string VKeyKeys(const std::string& label) {
-  return "vertex_" + label + "_keys";
-}
-std::string VKeyIndices(const std::string& label) {
-  return "vertex_" + label + "_indices";
-}
-std::string VKeyVTs(const std::string& label) {
-  return "vertex_" + label + "_v_ts";
-}
-std::string VKeyProp(const std::string& label, size_t i) {
-  return "vertex_" + label + "_prop_" + std::to_string(i);
-}
-std::string EKey(const std::string& src, const std::string& edge,
-                 const std::string& dst, const std::string& suffix) {
-  return "edge_" + src + "_" + edge + "_" + dst + "_" + suffix;
-}
-std::string EKeyInCsr(const std::string& src, const std::string& edge,
-                      const std::string& dst) {
-  return EKey(src, edge, dst, "in_csr");
-}
-std::string EKeyOutCsr(const std::string& src, const std::string& edge,
-                       const std::string& dst) {
-  return EKey(src, edge, dst, "out_csr");
-}
-std::string EKeyProp(const std::string& src, const std::string& edge,
-                     const std::string& dst, size_t i) {
-  return EKey(src, edge, dst, "prop_" + std::to_string(i));
-}
-std::string IndexerScalarKey(const std::string& vlabel,
-                             const std::string& field) {
-  return "indexer_" + vlabel + "/" + field;
-}
-std::string EdgeScalarKey(const std::string& src, const std::string& edge,
-                          const std::string& dst, const std::string& field) {
-  return "edge_" + src + "_" + edge + "_" + dst + "/" + field;
-}
-
-// All-or-nothing restore.  If the skeleton key is absent the label has no
-// checkpoint state, so we delegate to Init.  Otherwise every leaf MUST be
-// in the store — TakeModule throws on a miss, surfacing partial dumps.
-VertexTable OpenVertexTable(Checkpoint& ckp,
-                            std::shared_ptr<const VertexSchema> vs,
-                            ModuleStore& store, const SnapshotMeta& meta,
-                            MemoryLevel level) {
-  VertexTable vt(vs);
-  vt.SetMemoryLevel(level);
-  const auto& lbl = vs->label_name;
-
-  if (!store.Contains(VKeyKeys(lbl))) {
-    vt.Init(ckp, level);
-    return vt;
-  }
-
-  auto& idx = vt.get_indexer();
-  idx.SetKeys(store.TakeModule<ColumnBase>(VKeyKeys(lbl)));
-  // indices is a raw IDataContainer — persisted as a path-only stub entry
-  // in meta (empty module_type), so it's not loaded by ModuleStore::Open.
-  // Open the file directly here.
-  auto indices_desc = meta.module(VKeyIndices(lbl));
-  CHECK(indices_desc.has_value())
-      << "missing indices meta entry for vertex " << lbl;
-  idx.SetIndices(ckp.OpenFile(indices_desc->get_path("data"), level));
-  idx.SetNumElements(
-      meta.GetScalarAs<size_t>(IndexerScalarKey(lbl, "num_elements"))
-          .value_or(0));
-  idx.SetNumSlotsMinusOne(
-      meta.GetScalarAs<size_t>(IndexerScalarKey(lbl, "num_slots_minus_one"))
-          .value_or(0));
-  idx.SetHashPolicyIndex(
-      meta.GetScalarAs<size_t>(IndexerScalarKey(lbl, "hash_policy"))
-          .value_or(0));
-
-  auto table = std::make_unique<Table>(vs->property_names, vs->property_types);
-  for (size_t i = 0; i < vs->property_types.size(); ++i) {
-    table->SetColumn(static_cast<int>(i),
-                     std::shared_ptr<ColumnBase>(
-                         store.TakeModule<ColumnBase>(VKeyProp(lbl, i))));
-  }
-  vt.SetTable(std::move(table));
-
-  vt.SetVertexTimestamp(store.TakeModule<VertexTimestamp>(VKeyVTs(lbl)));
-  return vt;
-}
-
-// Hand every leaf of @p vt to @p store (transferring ownership) and write
-// indexer scalars to @p meta.  After this call @p vt is empty; the eventual
-// store.Dump() drives Module::Dump on each leaf, and the ModuleStore (which
-// goes out of scope at the end of PropertyGraph::Dump) cleans up.  Table
-// columns are dumped inline because Table holds shared_ptr<ColumnBase> and
-// can't transfer ownership into a unique_ptr-typed store.
-void DisassembleVertexTable(VertexTable& vt, ModuleStore& store,
-                            SnapshotMeta& meta, Checkpoint& ckp) {
-  const auto& lbl = vt.get_vertex_schema_ptr()->label_name;
-  auto& idx = vt.get_indexer();
-  meta.SetScalar(IndexerScalarKey(lbl, "num_elements"),
-                 std::to_string(idx.GetNumElements()));
-  meta.SetScalar(IndexerScalarKey(lbl, "num_slots_minus_one"),
-                 std::to_string(idx.GetNumSlotsMinusOne()));
-  meta.SetScalar(IndexerScalarKey(lbl, "hash_policy"),
-                 std::to_string(idx.GetHashPolicyIndex()));
-  store.SetModule(VKeyKeys(lbl), idx.TakeKeys());
-  // indices is a raw IDataContainer — Commit it, then record the path on a
-  // stub meta entry (empty module_type) so OpenVertexTable can find it.
-  {
-    auto indices_buf = idx.TakeIndices();
-    ModuleDescriptor indices_desc;
-    indices_desc.set_path("data", ckp.Commit(*indices_buf));
-    meta.set_module(VKeyIndices(lbl), std::move(indices_desc));
-  }
-
-  auto table = vt.TakeTable();
-  for (size_t i = 0; i < table->col_num(); ++i) {
-    meta.set_module(VKeyProp(lbl, i), table->get_column_by_id(i)->Dump(ckp));
-  }
-  store.SetModule(VKeyVTs(lbl), vt.TakeVertexTimestamp());
-}
-
-// Same all-or-nothing rule as OpenVertexTable; out_csr is the skeleton.
-EdgeTable OpenEdgeTable(Checkpoint& ckp, std::shared_ptr<const EdgeSchema> es,
-                        ModuleStore& store, const SnapshotMeta& meta,
-                        MemoryLevel level) {
-  EdgeTable et(es);
-  et.SetMemoryLevel(level);
-  const auto& src = es->src_label_name;
-  const auto& edge = es->edge_label_name;
-  const auto& dst = es->dst_label_name;
-
-  if (!store.Contains(EKeyOutCsr(src, edge, dst))) {
-    et.Init(ckp, level);
-    return et;
-  }
-
-  et.SetInCsr(store.TakeModule<CsrBase>(EKeyInCsr(src, edge, dst)));
-  et.SetOutCsr(store.TakeModule<CsrBase>(EKeyOutCsr(src, edge, dst)));
-
-  if (!es->is_bundled()) {
-    auto table = std::make_unique<Table>(es->property_names, es->properties);
-    for (size_t i = 0; i < es->properties.size(); ++i) {
-      table->SetColumn(static_cast<int>(i),
-                       std::shared_ptr<ColumnBase>(store.TakeModule<ColumnBase>(
-                           EKeyProp(src, edge, dst, i))));
-    }
-    et.SetTable(std::move(table));
-    et.SetTableIdx(
-        meta.GetScalarAs<uint64_t>(EdgeScalarKey(src, edge, dst, "table_idx"))
-            .value_or(0));
-  }
-  et.SetCapacity(
-      meta.GetScalarAs<uint64_t>(EdgeScalarKey(src, edge, dst, "capacity"))
-          .value_or(0));
-  return et;
-}
-
-void DisassembleEdgeTable(EdgeTable& et, ModuleStore& store, SnapshotMeta& meta,
-                          Checkpoint& ckp) {
-  auto es = et.get_edge_schema_ptr();
-  if (!es) {
-    return;
-  }
-  const auto& src = es->src_label_name;
-  const auto& edge = es->edge_label_name;
-  const auto& dst = es->dst_label_name;
-
-  store.SetModule(EKeyOutCsr(src, edge, dst), et.TakeOutCsr());
-  store.SetModule(EKeyInCsr(src, edge, dst), et.TakeInCsr());
-  if (!es->is_bundled()) {
-    auto table = et.TakeTable();
-    for (size_t i = 0; i < table->col_num(); ++i) {
-      meta.set_module(EKeyProp(src, edge, dst, i),
-                      table->get_column_by_id(i)->Dump(ckp));
-    }
-    meta.SetScalar(EdgeScalarKey(src, edge, dst, "table_idx"),
-                   std::to_string(et.GetTableIdx()));
-  }
-  meta.SetScalar(EdgeScalarKey(src, edge, dst, "capacity"),
-                 std::to_string(et.GetCapacity()));
-}
-
-}  // namespace
 
 PropertyGraph::PropertyGraph()
     : ckp_(nullptr),
@@ -936,7 +749,7 @@ void PropertyGraph::Open(std::shared_ptr<Checkpoint> ckp,
       vertex_tables_.emplace_back();
       continue;
     }
-    vertex_tables_.emplace_back(OpenVertexTable(
+    vertex_tables_.emplace_back(VertexTable::OpenFrom(
         *ckp, schema_.get_vertex_schema(i), store, meta, memory_level_));
     auto v_size = vertex_tables_[i].Size();
     vertex_tables_[i].EnsureCapacity(v_size < 4096 ? 4096
@@ -948,7 +761,7 @@ void PropertyGraph::Open(std::shared_ptr<Checkpoint> ckp,
     auto [src_label_i, dst_label_i, e_label_i] =
         schema_.parse_edge_label(index);
     EdgeTable et =
-        OpenEdgeTable(*ckp, edge_schema, store, meta, memory_level_);
+        EdgeTable::OpenFrom(*ckp, edge_schema, store, meta, memory_level_);
     auto e_size = et.PropTableSize();
     size_t e_cap = e_size < 4096 ? 4096 : e_size + (e_size + 4) / 5;
     et.EnsureCapacity(vertex_capacities[src_label_i],
@@ -1093,7 +906,7 @@ void PropertyGraph::Dump(Checkpoint& ckp, bool reopen) {
       auto v_size = vertex_tables_[i].LidNum();
       EnsureCapacity(i, v_size < 4096 ? 4096 : v_size + v_size / 4);
       vertex_capacity[i] = vertex_tables_[i].Capacity();
-      DisassembleVertexTable(vertex_tables_[i], store, meta, ckp);
+      vertex_tables_[i].DisassembleTo(store, meta, ckp);
     }
   }
 
@@ -1123,7 +936,7 @@ void PropertyGraph::Dump(Checkpoint& ckp, bool reopen) {
           EnsureCapacity(src_label_i, dst_label_i, e_label_i,
                          vertex_capacity[src_label_i],
                          vertex_capacity[dst_label_i], new_cap);
-          DisassembleEdgeTable(edge_table, store, meta, ckp);
+          edge_table.DisassembleTo(store, meta, ckp);
         }
       }
     }
