@@ -146,7 +146,7 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
   }
 
   std::tuple<std::vector<vid_t>, std::vector<vid_t>> batch_export(
-      std::shared_ptr<ColumnBase> prev_data_col) const override {
+      ColumnBase* prev_data_col) const override {
     std::vector<vid_t> src_list, dst_list;
     std::vector<EDATA_T> data_list;
     const nbr_t* const* adjlists =
@@ -283,7 +283,7 @@ class SingleMutableCsr : public TypedCsrBase<EDATA_T> {
   }
 
   std::tuple<std::vector<vid_t>, std::vector<vid_t>> batch_export(
-      std::shared_ptr<ColumnBase> prev_data_col) const override {
+      ColumnBase* prev_data_col) const override {
     std::vector<vid_t> src_list, dst_list;
     std::vector<EDATA_T> data_list;
     const nbr_t* nbrs = reinterpret_cast<const nbr_t*>(nbr_list_->GetData());
@@ -394,7 +394,7 @@ class EmptyCsr : public TypedCsrBase<EDATA_T> {
   }
 
   std::tuple<std::vector<vid_t>, std::vector<vid_t>> batch_export(
-      std::shared_ptr<ColumnBase> prev_data_col) const override {
+      ColumnBase* prev_data_col) const override {
     return {};
   }
 
