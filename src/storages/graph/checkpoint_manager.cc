@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
-#include "neug/storages/workspace.h"
-#include "neug/storages/snapshot_meta.h"
+#include "neug/storages/checkpoint_manager.h"
+#include "neug/storages/checkpoint_manifest.h"
 #include "neug/utils/exception/exception.h"
 
 #include <charconv>
@@ -49,14 +49,14 @@ static bool parse_checkpoint_path(const std::string& path, int32_t& id) {
   return true;
 }
 
-Workspace::Workspace() {}
+CheckpointManager::CheckpointManager() {}
 
-Workspace::~Workspace() {}
+CheckpointManager::~CheckpointManager() {}
 
-void Workspace::Open(const std::string& db_dir) {
+void CheckpointManager::Open(const std::string& db_dir) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!db_dir_.empty()) {
-    LOG(WARNING) << "Workspace::Open called on already-open workspace: "
+    LOG(WARNING) << "CheckpointManager::Open called on already-open workspace: "
                  << db_dir_ << ", reopening to: " << db_dir;
     db_dir_.clear();
     checkpoints_.clear();
@@ -76,23 +76,23 @@ void Workspace::Open(const std::string& db_dir) {
       }
     }
   } catch (const std::filesystem::filesystem_error& e) {
-    LOG(ERROR) << "Workspace::Open: failed to read directory " << db_dir_
+    LOG(ERROR) << "CheckpointManager::Open: failed to read directory " << db_dir_
                << ": " << e.what();
   }
 }
 
-void Workspace::Close() {
+void CheckpointManager::Close() {
   std::lock_guard<std::mutex> lock(mutex_);
   db_dir_.clear();
   checkpoints_.clear();
 }
 
-size_t Workspace::NumCheckpoints() const {
+size_t CheckpointManager::NumCheckpoints() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return checkpoints_.size();
 }
 
-int32_t Workspace::HeadId() const {
+int32_t CheckpointManager::HeadId() const {
   std::lock_guard<std::mutex> lock(mutex_);
   if (checkpoints_.empty()) {
     return kInvalidCheckpointId;
@@ -100,18 +100,18 @@ int32_t Workspace::HeadId() const {
   return checkpoints_.rbegin()->first;
 }
 
-int32_t Workspace::CreateCheckpoint() {
+int32_t CheckpointManager::CreateCheckpoint() {
   std::lock_guard<std::mutex> lock(mutex_);
   int32_t id = checkpoints_.empty() ? 0 : checkpoints_.rbegin()->first + 1;
   auto path = db_dir_ + "/checkpoint-" + std::to_string(id);
 
   std::filesystem::create_directories(path);
-  SnapshotMeta::GenerateEmptyMeta(path + "/meta");
+  CheckpointManifest::GenerateEmptyMeta(path + "/meta");
   checkpoints_[id] = Checkpoint::Open(path, id);
   return id;
 }
 
-std::shared_ptr<Checkpoint> Workspace::GetCheckpoint(int32_t id) const {
+std::shared_ptr<Checkpoint> CheckpointManager::GetCheckpoint(int32_t id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto& ptr = checkpoints_.at(id);
   assert(ptr != nullptr);

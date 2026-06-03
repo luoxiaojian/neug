@@ -16,8 +16,8 @@
 #include "neug/storages/graph/edge_table.h"
 
 #include "neug/storages/module/module_factory.h"
-#include "neug/storages/module/module_store.h"
-#include "neug/storages/snapshot_meta.h"
+#include "neug/storages/module/module_broker.h"
+#include "neug/storages/checkpoint_manifest.h"
 
 #include <arrow/api.h>
 #include <arrow/array/array_base.h>
@@ -36,7 +36,7 @@
 #include "neug/storages/csr/mutable_csr.h"
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/storages/module_descriptor.h"
-#include "neug/storages/workspace.h"
+#include "neug/storages/checkpoint_manager.h"
 #include "neug/utils/arrow_utils.h"
 #include "neug/utils/file_utils.h"
 #include "neug/utils/property/types.h"
@@ -1090,7 +1090,7 @@ std::string EdgeTable::ScalarKey(const std::string& src,
 
 EdgeTable EdgeTable::OpenFrom(Checkpoint& ckp,
                               std::shared_ptr<const EdgeSchema> es,
-                              ModuleStore& store, const SnapshotMeta& meta,
+                              ModuleBroker& store, const CheckpointManifest& meta,
                               MemoryLevel level) {
   EdgeTable et(es);
   et.SetMemoryLevel(level);
@@ -1124,7 +1124,7 @@ EdgeTable EdgeTable::OpenFrom(Checkpoint& ckp,
   return et;
 }
 
-void EdgeTable::DisassembleTo(ModuleStore& store, SnapshotMeta& meta,
+void EdgeTable::DisassembleTo(ModuleBroker& store, CheckpointManifest& meta,
                               Checkpoint& ckp) {
   if (!meta_) {
     return;

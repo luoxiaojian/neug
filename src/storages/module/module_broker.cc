@@ -13,17 +13,17 @@
  * limitations under the License.
  */
 
-#include "neug/storages/module/module_store.h"
+#include "neug/storages/module/module_broker.h"
 
 #include "neug/utils/exception/exception.h"
 
 namespace neug {
 
-void ModuleStore::Open(Checkpoint& checkpoint, MemoryLevel level) {
+void ModuleBroker::Open(Checkpoint& checkpoint, MemoryLevel level) {
   Open(checkpoint, checkpoint.GetMeta(), level);
 }
 
-void ModuleStore::Open(Checkpoint& checkpoint, const SnapshotMeta& meta,
+void ModuleBroker::Open(Checkpoint& checkpoint, const CheckpointManifest& meta,
                        MemoryLevel level) {
   auto& factory = ModuleFactory::instance();
   for (const auto& [name, desc] : meta.modules()) {
@@ -35,7 +35,7 @@ void ModuleStore::Open(Checkpoint& checkpoint, const SnapshotMeta& meta,
     auto module = factory.Create(desc.module_type);
     if (!module) {
       THROW_INVALID_ARGUMENT_EXCEPTION(
-          "ModuleStore::Open: unknown module_type '" + desc.module_type +
+          "ModuleBroker::Open: unknown module_type '" + desc.module_type +
           "' for entry '" + name +
           "'.  Make sure the type is registered via NEUG_REGISTER_MODULE or "
           "NEUG_REGISTER_TEMPLATE_MODULE.");
@@ -45,12 +45,12 @@ void ModuleStore::Open(Checkpoint& checkpoint, const SnapshotMeta& meta,
   }
 }
 
-void ModuleStore::SetModule(const std::string& name,
+void ModuleBroker::SetModule(const std::string& name,
                             std::unique_ptr<Module>&& module) {
   modules_[name] = std::move(module);
 }
 
-void ModuleStore::Dump(Checkpoint& checkpoint, SnapshotMeta& meta) {
+void ModuleBroker::Dump(Checkpoint& checkpoint, CheckpointManifest& meta) {
   for (auto& [name, module] : modules_) {
     if (!module) {
       continue;
@@ -59,21 +59,21 @@ void ModuleStore::Dump(Checkpoint& checkpoint, SnapshotMeta& meta) {
   }
 }
 
-bool ModuleStore::Contains(const std::string& name) const {
+bool ModuleBroker::Contains(const std::string& name) const {
   return modules_.count(name) > 0;
 }
 
-const Module* ModuleStore::GetModule(const std::string& name) const {
+const Module* ModuleBroker::GetModule(const std::string& name) const {
   auto it = modules_.find(name);
   return it == modules_.end() ? nullptr : it->second.get();
 }
 
-Module* ModuleStore::GetModule(const std::string& name) {
+Module* ModuleBroker::GetModule(const std::string& name) {
   auto it = modules_.find(name);
   return it == modules_.end() ? nullptr : it->second.get();
 }
 
-std::unique_ptr<Module> ModuleStore::TakeModule(const std::string& name) {
+std::unique_ptr<Module> ModuleBroker::TakeModule(const std::string& name) {
   auto it = modules_.find(name);
   if (it == modules_.end()) {
     return nullptr;
