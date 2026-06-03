@@ -414,12 +414,8 @@ class LFIndexer {
   }
 
   void Close() {
-    if (keys_) {
-      keys_->Close();
-    }
-    if (indices_) {
-      indices_->Close();
-    }
+    keys_.reset();
+    indices_.reset();
     indices_size_ = 0;
   }
 

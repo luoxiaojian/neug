@@ -33,7 +33,7 @@ namespace neug {
 class MMapContainer : public IDataContainer {
  public:
   MMapContainer();
-  virtual ~MMapContainer() {}
+  ~MMapContainer() override { Close(); }
   inline FileHeader* GetHeader() const {
     if (mmap_data_ == nullptr || mmap_size_ < sizeof(FileHeader)) {
       return nullptr;
@@ -44,7 +44,7 @@ class MMapContainer : public IDataContainer {
   std::string GetPath() const override;
 
   void Open(const std::string& path) override;
-  void Close() override;
+  void Close();
   void Dump(const std::string& path) override;
   virtual void Sync() override;
   bool IsDirty() override;
