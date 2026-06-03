@@ -47,9 +47,9 @@ void MutableCsr<EDATA_T>::Open(Checkpoint& ckp,
                                MemoryLevel memory_level) {
   unsorted_since_ = std::stoull(descriptor.get("unsorted_since").value_or("0"));
   edge_num_.store(std::stoull(descriptor.get("edge_num").value_or("0")));
-  degree_list_ = ckp.OpenFile(descriptor.get_path("degree_list"), memory_level);
-  cap_list_ = ckp.OpenFile(descriptor.get_path("capacity_list"), memory_level);
-  nbr_list_ = ckp.OpenFile(descriptor.get_path("nbr_list"), memory_level);
+  degree_list_ = ckp.OpenFile(descriptor.require_path(ModuleDescriptor::kDegreeListPath), memory_level);
+  cap_list_ = ckp.OpenFile(descriptor.require_path(ModuleDescriptor::kCapacityListPath), memory_level);
+  nbr_list_ = ckp.OpenFile(descriptor.require_path(ModuleDescriptor::kNbrListPath), memory_level);
   auto v_cap = degree_list_->GetDataSize() / sizeof(int);
   adj_list_buffer_ =
       ckp.CreateRuntimeContainer(v_cap * sizeof(nbr_t*), memory_level);
@@ -91,7 +91,7 @@ ModuleDescriptor MutableCsr<EDATA_T>::Dump(Checkpoint& ckp) {
 
   // Each internal buffer's path is stored as a named entry in the
   // descriptor's typed paths_ map.
-  descriptor.set_path("degree_list", ckp.Commit(*degree_list_));
+  descriptor.set_path(ModuleDescriptor::kDegreeListPath, ckp.Commit(*degree_list_));
 
   const nbr_t* const* adj_lists =
       reinterpret_cast<const nbr_t* const*>(adj_list_buffer_->GetData());
@@ -125,8 +125,8 @@ ModuleDescriptor MutableCsr<EDATA_T>::Dump(Checkpoint& ckp) {
   nbr_out.close();
   nbr_path_committed = ckp.CommitRuntimeObject(runtime_uuid);
 
-  descriptor.set_path("nbr_list", nbr_path_committed);
-  descriptor.set_path("capacity_list", ckp.Commit(*cap_list_));
+  descriptor.set_path(ModuleDescriptor::kNbrListPath, nbr_path_committed);
+  descriptor.set_path(ModuleDescriptor::kCapacityListPath, ckp.Commit(*cap_list_));
   return descriptor;
 }
 
@@ -501,7 +501,7 @@ void SingleMutableCsr<EDATA_T>::Open(Checkpoint& ckp,
                                      MemoryLevel level) {
   assert(descriptor.module_type.empty() ||
          descriptor.module_type == ModuleTypeName());
-  nbr_list_ = ckp.OpenFile(descriptor.get_path("nbr_list"), level);
+  nbr_list_ = ckp.OpenFile(descriptor.require_path(ModuleDescriptor::kNbrListPath), level);
   edge_num_.store(std::stoull(descriptor.get("edge_num").value_or("0")));
 }
 
@@ -509,7 +509,7 @@ template <typename EDATA_T>
 ModuleDescriptor SingleMutableCsr<EDATA_T>::Dump(Checkpoint& ckp) {
   ModuleDescriptor descriptor;
   descriptor.module_type = ModuleTypeName();
-  descriptor.set_path("nbr_list", ckp.Commit(*nbr_list_));
+  descriptor.set_path(ModuleDescriptor::kNbrListPath, ckp.Commit(*nbr_list_));
   descriptor.set("edge_num", std::to_string(edge_num_.load()));
   return descriptor;
 }

@@ -245,8 +245,9 @@ class LFIndexer {
   void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel level, std::unique_ptr<ColumnBase> keys) {
     keys_ = std::move(keys);
-    auto indices_path = descriptor.get_path("indices");
-    SetIndices(ckp.OpenFile(indices_path, level));
+    SetIndices(ckp.OpenFile(
+        descriptor.get_path(ModuleDescriptor::kIndicesPath).value_or(""),
+        level));
     auto parse = [](const ModuleDescriptor& d, const char* key) -> size_t {
       auto val = d.get(key);
       return val.has_value() ? std::stoull(val.value()) : 0;
@@ -273,7 +274,8 @@ class LFIndexer {
 
     auto indices_buf = TakeIndices();
     if (indices_buf) {
-      descriptor.set_path("indices", ckp.Commit(*indices_buf));
+      descriptor.set_path(ModuleDescriptor::kIndicesPath,
+                          ckp.Commit(*indices_buf));
     }
     return descriptor;
   }

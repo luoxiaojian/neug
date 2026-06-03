@@ -34,6 +34,14 @@ namespace neug {
  * SnapshotMeta::modules_, keyed by the orchestration layer.
  */
 struct ModuleDescriptor {
+  // High-frequency path key constants
+  static constexpr const char* kDataPath = "data";
+  static constexpr const char* kItemsPath = "items";
+  static constexpr const char* kNbrListPath = "nbr_list";
+  static constexpr const char* kDegreeListPath = "degree_list";
+  static constexpr const char* kCapacityListPath = "capacity_list";
+  static constexpr const char* kIndicesPath = "indices";
+
   ModuleDescriptor() = default;
   ~ModuleDescriptor() = default;
   ModuleDescriptor(const ModuleDescriptor&) = default;
@@ -86,11 +94,25 @@ struct ModuleDescriptor {
     return *this;
   }
 
-  /// Look up a path by name.  Returns "" when absent — callers that need to
-  /// distinguish missing from empty should use has_path().
-  std::string get_path(const std::string& name) const {
+  /// Look up a path by name.  Returns std::nullopt when absent.
+  std::optional<std::string> get_path(const std::string& name) const {
     auto it = paths_.find(name);
-    return it == paths_.end() ? std::string{} : it->second;
+    if (it == paths_.end()) {
+      return std::nullopt;
+    }
+    return it->second;
+  }
+
+  /// Look up a path by name, throwing if absent.
+  /// Use when the path must exist (e.g. restoring from a checkpoint).
+  const std::string& require_path(const std::string& name) const {
+    auto it = paths_.find(name);
+    if (it == paths_.end()) {
+      throw std::invalid_argument(
+          "ModuleDescriptor: required path '" + name +
+          "' is missing (module_type='" + module_type + "')");
+    }
+    return it->second;
   }
 
   bool has_path(const std::string& name) const {
