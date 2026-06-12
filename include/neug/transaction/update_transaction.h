@@ -285,7 +285,7 @@ class UpdateTransaction {
   // TODO(zhanglei): Remove batch method from UpdateTransaction after
   // refactoring GraphInterface.
   inline Status BatchAddVertices(
-      label_t v_label_id, std::shared_ptr<IRecordBatchSupplier> supplier) {
+      label_t v_label_id, std::shared_ptr<IDataChunkSupplier> supplier) {
     ENSURE_VERTEX_LABEL_NOT_DELETED(v_label_id);
     return graph_.BatchAddVertices(v_label_id, supplier);
   }
@@ -294,7 +294,7 @@ class UpdateTransaction {
   // refactoring GraphInterface.
   inline Status BatchAddEdges(label_t src_label, label_t dst_label,
                               label_t edge_label,
-                              std::shared_ptr<IRecordBatchSupplier> supplier) {
+                              std::shared_ptr<IDataChunkSupplier> supplier) {
     ENSURE_VERTEX_LABEL_NOT_DELETED(src_label);
     ENSURE_VERTEX_LABEL_NOT_DELETED(dst_label);
     ENSURE_EDGE_LABEL_NOT_DELETED(src_label, dst_label, edge_label);
@@ -385,9 +385,9 @@ class StorageTPUpdateInterface : public StorageUpdateInterface {
 
   Status BatchAddVertices(
       label_t v_label_id,
-      std::shared_ptr<IRecordBatchSupplier> supplier) override;
+      std::shared_ptr<IDataChunkSupplier> supplier) override;
   Status BatchAddEdges(label_t src_label, label_t dst_label, label_t edge_label,
-                       std::shared_ptr<IRecordBatchSupplier> supplier) override;
+                       std::shared_ptr<IDataChunkSupplier> supplier) override;
   Status BatchDeleteVertices(label_t v_label_id,
                              const std::vector<vid_t>& vids) override;
   Status BatchDeleteEdges(

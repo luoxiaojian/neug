@@ -14,10 +14,6 @@
  */
 #pragma once
 
-#include <arrow/api.h>
-#include <arrow/csv/api.h>
-#include <arrow/io/api.h>
-#include <arrow/record_batch.h>
 #include <glog/logging.h>
 #include <stddef.h>
 
@@ -28,88 +24,83 @@
 #include <utility>
 #include <vector>
 
+#include "neug/execution/common/data_chunk.h"
+#include "neug/storages/loader/csv_read_config.h"
 #include "neug/storages/loader/loading_config.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/string_utils.h"
 
-namespace arrow {
-class Array;
-class RecordBatch;
-class Schema;
-class Table;
-class TableBatchReader;
-
-namespace csv {
-class StreamingReader;
-struct ConvertOptions;
-struct ParseOptions;
-struct ReadOptions;
-}  // namespace csv
-}  // namespace arrow
-
 namespace neug {
+
+struct CsvSupplierRuntime;
 
 void printDiskRemaining(const std::string& path);
 
-void put_boolean_option(arrow::csv::ConvertOptions& convert_options);
+void put_boolean_option(CsvReadConfig& config);
 
 void put_delimiter_option(const std::string& delimiter_str,
-                          arrow::csv::ParseOptions& parse_options);
+                          CsvReadConfig& config);
 
 std::string process_header_row_token(const std::string& token, bool is_quoting,
                                      char quote_char, bool is_escaping,
                                      char escape_char);
 
 std::vector<std::string> read_header(const std::string& file_name,
-                                     char delimiter, bool is_quoting,
-                                     char quote_char, bool is_escaping,
-                                     char escape_char);
+                                     const CsvReadConfig& config);
 
 std::vector<std::string> columnMappingsToSelectedCols(
     const std::vector<std::tuple<size_t, std::string, std::string>>&
         column_mappings);
 
 void put_column_names_option(bool header_row, const std::string& file_path,
-                             char delimiter, bool is_quoting, char quote_char,
-                             bool is_escaping, char escape_char,
-                             arrow::csv::ReadOptions& read_options, size_t len);
+                             CsvReadConfig& config, size_t len);
 
-class IRecordBatchSupplier {
+void set_column_types_on_config(const std::vector<DataType>& column_types,
+                                const std::vector<std::string>& column_names,
+                                CsvReadConfig& config);
+
+/// Build a CsvReadConfig from batch-import style CSV option strings.
+CsvReadConfig build_csv_read_config(
+    const std::string& file_path,
+    const std::unordered_map<std::string, std::string>& csv_options,
+    const std::vector<DataType>& column_types);
+
+class IDataChunkSupplier {
  public:
-  virtual ~IRecordBatchSupplier() = default;
-  virtual std::shared_ptr<arrow::RecordBatch> GetNextBatch() = 0;
+  virtual ~IDataChunkSupplier() = default;
+  virtual std::shared_ptr<execution::DataChunk> GetNextChunk() = 0;
   virtual int64_t RowNum() const = 0;
 };
 
-class SupplierWrapperWithFirstBatch : public IRecordBatchSupplier {
+class ChunkSupplierWrapper : public IDataChunkSupplier {
  public:
-  explicit SupplierWrapperWithFirstBatch(
-      const std::vector<std::shared_ptr<IRecordBatchSupplier>>& suppliers,
-      std::shared_ptr<arrow::RecordBatch> first_batch)
+  explicit ChunkSupplierWrapper(
+      const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers,
+      std::shared_ptr<execution::DataChunk> first_chunk)
       : suppliers_(suppliers),
-        first_batch_(std::move(first_batch)),
-        has_first_batch_(true) {}
-  SupplierWrapperWithFirstBatch(
-      const std::vector<std::shared_ptr<IRecordBatchSupplier>>& suppliers)
-      : suppliers_(suppliers), has_first_batch_(false) {}
+        first_chunk_(std::move(first_chunk)),
+        has_first_chunk_(true) {}
+  ChunkSupplierWrapper(
+      const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers)
+      : suppliers_(suppliers), has_first_chunk_(false) {}
 
-  std::shared_ptr<arrow::RecordBatch> GetNextBatch() override {
-    if (has_first_batch_) {
-      has_first_batch_ = false;
-      return first_batch_;
+  std::shared_ptr<execution::DataChunk> GetNextChunk() override {
+    if (has_first_chunk_) {
+      has_first_chunk_ = false;
+      return first_chunk_;
     }
     if (suppliers_.empty()) {
-      return nullptr;  // No more batches to supply
+      return nullptr;
     }
     if (current_supplier_index_ >= suppliers_.size()) {
-      return nullptr;  // No more suppliers left
+      return nullptr;
     }
-    auto batch = suppliers_[current_supplier_index_]->GetNextBatch();
-    if (!batch) {
+    auto chunk = suppliers_[current_supplier_index_]->GetNextChunk();
+    if (!chunk) {
       current_supplier_index_++;
-      return GetNextBatch();  // Try the next supplier
+      return GetNextChunk();
     }
-    return batch;  // Return the batch from the current supplier
+    return chunk;
   }
 
   int64_t RowNum() const override {
@@ -121,102 +112,31 @@ class SupplierWrapperWithFirstBatch : public IRecordBatchSupplier {
   }
 
  private:
-  std::vector<std::shared_ptr<IRecordBatchSupplier>> suppliers_;
-  std::shared_ptr<arrow::RecordBatch> first_batch_;
-  bool has_first_batch_;
+  std::vector<std::shared_ptr<IDataChunkSupplier>> suppliers_;
+  std::shared_ptr<execution::DataChunk> first_chunk_;
+  bool has_first_chunk_;
   size_t current_supplier_index_ = 0;
 };
 
-class CSVStreamRecordBatchSupplier : public IRecordBatchSupplier {
+/// csv-parser based supplier. Reads CSV in chunks and yields ValueColumns.
+class CSVChunkSupplier : public IDataChunkSupplier {
  public:
-  CSVStreamRecordBatchSupplier(const std::string& file_path,
-                               arrow::csv::ConvertOptions convert_options,
-                               arrow::csv::ReadOptions read_options,
-                               arrow::csv::ParseOptions parse_options);
+  CSVChunkSupplier(const std::string& file_path, CsvReadConfig config);
 
-  std::shared_ptr<arrow::RecordBatch> GetNextBatch() override;
+  ~CSVChunkSupplier() override;
+
+  std::shared_ptr<execution::DataChunk> GetNextChunk() override;
 
   int64_t RowNum() const override { return row_num_; }
 
  private:
-  int64_t row_num_;
+  int64_t row_num_ = 0;
   std::string file_path_;
-  std::shared_ptr<arrow::csv::StreamingReader> reader_;
+  std::unique_ptr<CsvSupplierRuntime> runtime_;
 };
 
-class CSVTableRecordBatchSupplier : public IRecordBatchSupplier {
- public:
-  CSVTableRecordBatchSupplier(const std::string& file_path,
-                              arrow::csv::ConvertOptions convert_options,
-                              arrow::csv::ReadOptions read_options,
-                              arrow::csv::ParseOptions parse_options);
-
-  std::shared_ptr<arrow::RecordBatch> GetNextBatch() override;
-
-  int64_t RowNum() const override { return table_->num_rows(); }
-
- private:
-  std::string file_path_;
-  std::shared_ptr<arrow::Table> table_;
-  std::shared_ptr<arrow::TableBatchReader> reader_;
-};
-
-/**
- * @brief A record batch supplier that provides all record batches from a
- * vector of arrays. Already in memory.
- */
-class ArrowRecordBatchArraySupplier : public IRecordBatchSupplier {
- public:
-  ArrowRecordBatchArraySupplier(
-      const std::vector<std::vector<std::shared_ptr<arrow::Array>>>& arrays,
-      const std::shared_ptr<arrow::Schema>& schema)
-      : arrays_(arrays), schema_(schema), current_batch_index_(0) {
-    if (arrays_.empty()) {
-      batch_num_ = 0;
-    } else {
-      batch_num_ = arrays_[0].size();
-    }
-  }
-
-  std::shared_ptr<arrow::RecordBatch> GetNextBatch() override;
-
-  int64_t RowNum() const override {
-    int64_t total_rows = 0;
-    if (!arrays_.empty()) {
-      for (const auto& batch : arrays_[0]) {
-        total_rows += batch->length();
-      }
-    }
-    return total_rows;
-  }
-
- private:
-  // NUM_COLUMNS * NUM_BATCHES
-  std::vector<std::vector<std::shared_ptr<arrow::Array>>> arrays_;
-  std::shared_ptr<arrow::Schema> schema_;
-  size_t current_batch_index_;
-  size_t batch_num_;
-};
-
-/**
- * @brief A record batch supplier that provides all record batches from a arrow
- * reader, which is a streaming reader or a table reader, producing record
- * batches from a CSV file.
- */
-class ArrowRecordBatchStreamSupplier : public IRecordBatchSupplier {
- public:
-  ArrowRecordBatchStreamSupplier(
-      const std::shared_ptr<arrow::RecordBatchReader>& reader, int64_t row_num)
-      : row_num_(row_num), reader_(reader) {}
-
-  std::shared_ptr<arrow::RecordBatch> GetNextBatch() override;
-
-  int64_t RowNum() const override { return row_num_; }
-
- private:
-  int64_t row_num_;
-  std::shared_ptr<arrow::RecordBatchReader> reader_;
-};
+using CSVStreamChunkSupplier = CSVChunkSupplier;
+using CSVTableChunkSupplier = CSVChunkSupplier;
 
 void fillVertexReaderMeta(label_t v_label, const std::string& v_label_name,
                           const std::string& v_file,
@@ -224,9 +144,7 @@ void fillVertexReaderMeta(label_t v_label, const std::string& v_label_name,
                           const std::vector<std::string>& vertex_property_names,
                           const std::vector<DataTypeId>& vertex_property_types,
                           DataTypeId pk_type, const std::string& pk_name,
-                          size_t pk_ind, arrow::csv::ReadOptions& read_options,
-                          arrow::csv::ParseOptions& parse_options,
-                          arrow::csv::ConvertOptions& convert_options);
+                          size_t pk_ind, CsvReadConfig& config);
 
 void fillEdgeReaderMeta(label_t src_label_id, label_t dst_label_id,
                         label_t label_id, const std::string& edge_label_name,
@@ -235,13 +153,12 @@ void fillEdgeReaderMeta(label_t src_label_id, label_t dst_label_id,
                         const std::vector<std::string>& edge_property_names,
                         const std::vector<DataTypeId>& edge_property_types,
                         DataTypeId src_pk_type, DataTypeId dst_pk_type,
-                        arrow::csv::ReadOptions& read_options,
-                        arrow::csv::ParseOptions& parse_options,
-                        arrow::csv::ConvertOptions& convert_options);
+                        CsvReadConfig& config);
 
-void set_properties_column(std::shared_ptr<neug::ColumnBase> col,
-                           std::shared_ptr<arrow::ChunkedArray> array,
-                           const std::vector<vid_t>& vids,
-                           std::shared_mutex& mutex);
+void set_properties_from_context_column(
+    std::shared_ptr<neug::ColumnBase> col,
+    const std::shared_ptr<execution::IContextColumn>& ctx_col,
+    const std::vector<vid_t>& vids,
+    std::shared_mutex& mutex);
 
 }  // namespace neug

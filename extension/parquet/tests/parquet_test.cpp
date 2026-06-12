@@ -26,7 +26,7 @@
 #include <vector>
 
 #include "neug/compiler/common/case_insensitive_map.h"
-#include "neug/execution/common/columns/arrow_context_column.h"
+#include "neug/execution/common/columns/value_columns.h"
 #include "neug/execution/common/context.h"
 #include "neug/generated/proto/plan/basic_type.pb.h"
 #include "neug/utils/exception/exception.h"
@@ -448,13 +448,8 @@ TEST_F(ParquetTest, TestTypeMapping_StringToLargeUtf8) {
 
   // Verify string column is converted to large_utf8
   auto col1 = ctx.columns[1];
-  ASSERT_EQ(col1->column_type(), execution::ContextColumnType::kArrowArray);
-  auto arrayColumn1 = std::dynamic_pointer_cast<execution::ArrowArrayContextColumn>(col1);
-  auto arrowType1 = arrayColumn1->GetArrowType();
-  
-  EXPECT_TRUE(arrowType1->Equals(arrow::large_utf8()))
-      << "Extension should convert Arrow utf8 to large_utf8 for Neug STRING type. "
-      << "Got: " << arrowType1->ToString();
+  ASSERT_EQ(col1->column_type(), execution::ContextColumnType::kValue);
+  EXPECT_EQ(col1->elem_type().id(), neug::DataTypeId::kVarchar);
 }
 
 TEST_F(ParquetTest, TestTypeMapping_PreserveNumericTypes) {
@@ -505,22 +500,10 @@ TEST_F(ParquetTest, TestTypeMapping_PreserveNumericTypes) {
   EXPECT_EQ(ctx.col_num(), 4);
   EXPECT_EQ(ctx.row_num(), 1);
 
-  // Verify types are preserved correctly
-  auto col0 = std::dynamic_pointer_cast<execution::ArrowArrayContextColumn>(ctx.columns[0]);
-  EXPECT_TRUE(col0->GetArrowType()->Equals(arrow::int32()))
-      << "Extension should preserve int32 type mapping";
-  
-  auto col1 = std::dynamic_pointer_cast<execution::ArrowArrayContextColumn>(ctx.columns[1]);
-  EXPECT_TRUE(col1->GetArrowType()->Equals(arrow::int64()))
-      << "Extension should preserve int64 type mapping";
-  
-  auto col2 = std::dynamic_pointer_cast<execution::ArrowArrayContextColumn>(ctx.columns[2]);
-  EXPECT_TRUE(col2->GetArrowType()->Equals(arrow::float64()))
-      << "Extension should preserve double type mapping";
-  
-  auto col3 = std::dynamic_pointer_cast<execution::ArrowArrayContextColumn>(ctx.columns[3]);
-  EXPECT_TRUE(col3->GetArrowType()->Equals(arrow::boolean()))
-      << "Extension should preserve boolean type mapping";
+  EXPECT_EQ(ctx.columns[0]->elem_type().id(), neug::DataTypeId::kInt32);
+  EXPECT_EQ(ctx.columns[1]->elem_type().id(), neug::DataTypeId::kInt64);
+  EXPECT_EQ(ctx.columns[2]->elem_type().id(), neug::DataTypeId::kDouble);
+  EXPECT_EQ(ctx.columns[3]->elem_type().id(), neug::DataTypeId::kBoolean);
 }
 
 // =============================================================================
@@ -670,7 +653,7 @@ TEST_F(ParquetTest, TestIntegration_FilterPushdown) {
       << "Should filter to 3 rows with score > 90.0";
   
   // Verify the filtered data
-  auto col1 = std::dynamic_pointer_cast<execution::ArrowArrayContextColumn>(ctx.columns[1]);
+  auto col1 = std::dynamic_pointer_cast<execution::ValueColumn>(ctx.columns[1]);
   ASSERT_NE(col1, nullptr);
   const auto& columns = col1->GetColumns();
   ASSERT_FALSE(columns.empty());
@@ -701,8 +684,8 @@ TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
   EXPECT_EQ(ctx.col_num(), 3);
   // Verify extension translates batch_read option to streaming column type
   auto col0 = ctx.columns[0];
-  EXPECT_EQ(col0->column_type(), execution::ContextColumnType::kArrowStream)
-      << "Extension should use ArrowStream column type when batch_read=true";
+  EXPECT_EQ(col0->column_type(), execution::ContextColumnType::kChunkStream)
+      << "Extension should use ChunkStream column type when batch_read=true";
   
   // Test with batch_read=false (full read mode)
   auto sharedState2 = createSharedState(
@@ -717,8 +700,8 @@ TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
   reader2->read(localState2, ctx2);
 
   auto col0_2 = ctx2.columns[0];
-  EXPECT_EQ(col0_2->column_type(), execution::ContextColumnType::kArrowArray)
-      << "Extension should use ArrowArray column type when batch_read=false";
+  EXPECT_EQ(col0_2->column_type(), execution::ContextColumnType::kValue)
+      << "Extension should use Value column type when batch_read=false";
 }
 
 TEST_F(ParquetTest, TestIntegration_CombinedFilterAndProjection) {

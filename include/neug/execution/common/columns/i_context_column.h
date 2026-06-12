@@ -34,7 +34,7 @@ enum class ContextColumnType {
   kValue,
   kPath,
   kArrowArray,
-  kArrowStream,
+  kChunkStream,
   kNone,
 };
 

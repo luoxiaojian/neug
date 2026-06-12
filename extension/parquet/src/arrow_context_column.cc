@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-#include "neug/execution/common/columns/arrow_context_column.h"
+#include "parquet/arrow_context_column.h"
 
 #include <arrow/array/array_binary.h>
 #include <arrow/array/builder_binary.h>
@@ -23,6 +23,7 @@
 #include <glog/logging.h>
 #include <unordered_map>
 #include "neug/execution/common/columns/columns_utils.h"
+#include "neug/execution/common/data_chunk.h"
 #include "neug/utils/exception/exception.h"
 
 namespace neug {
@@ -375,6 +376,20 @@ std::shared_ptr<IContextColumn> ArrowArrayContextColumn::cast_to_value_column()
     builder->push_back_elem(get_elem(i));
   }
   return builder->finish();
+}
+
+std::shared_ptr<DataChunk> recordbatch_to_value_datachunk(
+    const std::shared_ptr<arrow::RecordBatch>& batch) {
+  if (!batch) {
+    return nullptr;
+  }
+  auto chunk = std::make_shared<DataChunk>();
+  for (int i = 0; i < batch->num_columns(); ++i) {
+    ArrowArrayContextColumn arrow_col(
+        std::vector<std::shared_ptr<arrow::Array>>{batch->column(i)});
+    chunk->set(i, arrow_col.cast_to_value_column());
+  }
+  return chunk;
 }
 
 }  // namespace execution

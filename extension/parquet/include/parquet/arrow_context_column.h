@@ -24,15 +24,23 @@
 #include <vector>
 
 #include "neug/execution/common/columns/i_context_column.h"
+#include "neug/execution/common/data_chunk.h"
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/exception/exception.h"
 namespace arrow {
+class Array;
 class DataType;
 class RecordBatch;
 }  // namespace arrow
 
 namespace neug {
-class IRecordBatchSupplier;
+namespace execution {
+class DataChunk;
+}  // namespace execution
+}  // namespace neug
+
+namespace neug {
+class IDataChunkSupplier;
 
 namespace execution {
 
@@ -121,77 +129,8 @@ class ArrowArrayContextColumnBuilder : public IContextColumnBuilder {
   std::vector<std::shared_ptr<arrow::Array>> columns_;
 };
 
-/**
- * @brief There are num_cols ArrowStreamContextColumn objects for a record
- * batch. Currently it is basiclly not well-implemented, and only workable with
- * BatchInsertVertex/Edge operator followed by.
- */
-class ArrowStreamContextColumn : public IContextColumn {
- public:
-  ArrowStreamContextColumn(
-      const std::vector<std::shared_ptr<IRecordBatchSupplier>>& suppliers)
-      : suppliers_(suppliers) {}
-
-  ~ArrowStreamContextColumn() = default;
-
-  std::string column_info() const override {
-    return "ArrowStreamContextColumn";
-  }
-
-  size_t size() const override { return suppliers_.size(); }
-
-  const DataType& elem_type() const override { return type_; }
-
-  ContextColumnType column_type() const override {
-    return ContextColumnType::kArrowStream;
-  }
-
-  std::vector<std::shared_ptr<IRecordBatchSupplier>> GetSuppliers() const {
-    return suppliers_;
-  }
-
-  Value get_elem(size_t idx) const override {
-    LOG(FATAL) << "get_elem not implemented for arrow stream column";
-    return Value(DataType::SQLNULL);
-  }
-
-  bool is_optional() const override {
-    LOG(FATAL) << "is_optional not implemented for arrow stream column";
-    return false;
-  }
-
- private:
-  std::shared_ptr<arrow::RecordBatch> first_batch_;
-  std::vector<std::shared_ptr<IRecordBatchSupplier>> suppliers_;
-  DataType type_;
-};
-
-/**
- * @brief ArrowStreamContextColumnBuilder is a context column builder
- * that is used to build a context column for streaming data in Apache Arrow
- * format. Each column take data from the streamReader's one column.
- */
-class ArrowStreamContextColumnBuilder : public IContextColumnBuilder {
- public:
-  ArrowStreamContextColumnBuilder(
-      const std::vector<std::shared_ptr<IRecordBatchSupplier>>& suppliers)
-      : suppliers_(suppliers) {}
-  ~ArrowStreamContextColumnBuilder() = default;
-
-  void reserve(size_t size) override {
-    LOG(FATAL) << "not implemented for arrow stream column";
-  }
-  void push_back_elem(const execution::Value& val) override {
-    LOG(FATAL) << "not implemented for arrow stream column";
-  }
-
-  std::shared_ptr<IContextColumn> finish() override {
-    return std::make_shared<ArrowStreamContextColumn>(suppliers_);
-  }
-
- private:
-  std::vector<std::shared_ptr<IRecordBatchSupplier>> suppliers_;
-};
+std::shared_ptr<DataChunk> recordbatch_to_value_datachunk(
+    const std::shared_ptr<arrow::RecordBatch>& batch);
 
 }  // namespace execution
 }  // namespace neug

@@ -1187,7 +1187,7 @@ void UpdateTransaction::invalidate_query_cache_if_needed() {
 void StorageTPUpdateInterface::CreateCheckpoint() { txn_.CreateCheckpoint(); }
 
 Status StorageTPUpdateInterface::BatchAddVertices(
-    label_t v_label_id, std::shared_ptr<IRecordBatchSupplier> supplier) {
+    label_t v_label_id, std::shared_ptr<IDataChunkSupplier> supplier) {
   LOG(ERROR) << "BatchAddVertices is not supported in TP mode currently.";
   return Status(StatusCode::ERR_NOT_SUPPORTED,
                 "BatchAddVertices is not supported in TP mode currently.");
@@ -1195,7 +1195,7 @@ Status StorageTPUpdateInterface::BatchAddVertices(
 
 Status StorageTPUpdateInterface::BatchAddEdges(
     label_t src_label, label_t dst_label, label_t edge_label,
-    std::shared_ptr<IRecordBatchSupplier> supplier) {
+    std::shared_ptr<IDataChunkSupplier> supplier) {
   LOG(ERROR) << "BatchAddEdges is not supported in TP mode currently.";
   return Status(StatusCode::ERR_NOT_SUPPORTED,
                 "BatchAddEdges is not supported in TP mode currently.");

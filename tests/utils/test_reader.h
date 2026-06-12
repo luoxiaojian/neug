@@ -21,15 +21,16 @@
 #include <memory>
 #include <vector>
 
-#include <arrow/filesystem/localfs.h>
-#include <arrow/type.h>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <vector>
+
 #include "neug/compiler/common/case_insensitive_map.h"
-#include "neug/execution/common/columns/arrow_context_column.h"
+#include "neug/execution/common/columns/chunk_context_column.h"
 #include "neug/execution/common/context.h"
 #include "neug/generated/proto/plan/basic_type.pb.h"
 #include "neug/generated/proto/plan/expr.pb.h"
-#include "neug/utils/reader/expression_converter.h"
-#include "neug/utils/reader/json_options.h"
 #include "neug/utils/reader/options.h"
 #include "neug/utils/reader/reader.h"
 #include "neug/utils/reader/schema.h"
@@ -244,13 +245,17 @@ class ReaderTest : public ::testing::Test {
     return sharedState;
   }
 
-  std::shared_ptr<reader::ArrowReader> createArrowReader(
+  std::shared_ptr<reader::CsvReader> createCsvReader(
       const std::shared_ptr<reader::ReadSharedState>& sharedState) {
-    auto fileSystem = std::make_shared<arrow::fs::LocalFileSystem>();
     auto optionsBuilder =
-        std::make_unique<reader::ArrowCsvOptionsBuilder>(sharedState);
-    return std::make_shared<reader::ArrowReader>(
-        sharedState, std::move(optionsBuilder), std::move(fileSystem));
+        std::make_unique<reader::CsvOptionsBuilder>(sharedState);
+    return std::make_shared<reader::CsvReader>(sharedState,
+                                               std::move(optionsBuilder));
+  }
+
+  std::shared_ptr<reader::CsvReader> createArrowReader(
+      const std::shared_ptr<reader::ReadSharedState>& sharedState) {
+    return createCsvReader(sharedState);
   }
 
   void createJsonFile(const std::string& filename, const std::string& content) {
@@ -282,18 +287,18 @@ class ReaderTest : public ::testing::Test {
     return sharedState;
   }
 
-  std::shared_ptr<reader::ArrowReader> createArrowJsonReader(
-      const std::shared_ptr<reader::ReadSharedState>& sharedState) {
-    auto fileSystem = std::make_shared<arrow::fs::LocalFileSystem>();
-    auto optionsBuilder =
-        std::make_unique<reader::ArrowJsonOptionsBuilder>(sharedState);
-    return std::make_shared<reader::ArrowReader>(
-        sharedState, std::move(optionsBuilder), std::move(fileSystem));
+  std::shared_ptr<reader::JsonReader> createJsonReader(
+      const std::shared_ptr<reader::ReadSharedState>& sharedState,
+      bool json_array_input = true) {
+    auto optionsBuilder = std::make_unique<reader::JsonOptionsBuilder>(
+        sharedState, json_array_input);
+    return std::make_shared<reader::JsonReader>(sharedState,
+                                               std::move(optionsBuilder));
   }
 
   // Helper function to count rows in batch_read mode
   // Extracts the first column from context, casts it to
-  // ArrowStreamContextColumn, and counts total rows by iterating through all
+  // ChunkStreamContextColumn, and counts total rows by iterating through all
   // batches from suppliers
   int64_t count_batch_row_num(const execution::Context& ctx) {
     // Get the first column from context
@@ -305,12 +310,12 @@ class ReaderTest : public ::testing::Test {
       return -1;  // Error: first column is null
     }
 
-    // Cast to ArrowStreamContextColumn
+    // Cast to ChunkStreamContextColumn
     auto streamColumn =
-        std::dynamic_pointer_cast<execution::ArrowStreamContextColumn>(
+        std::dynamic_pointer_cast<execution::ChunkStreamContextColumn>(
             firstColumn);
     if (!streamColumn) {
-      return -1;  // Error: not ArrowStreamContextColumn
+      return -1;  // Error: not ChunkStreamContextColumn
     }
 
     // Get suppliers from the stream column
@@ -326,11 +331,11 @@ class ReaderTest : public ::testing::Test {
         continue;  // Skip null suppliers
       }
       while (true) {
-        auto batch = supplier->GetNextBatch();
+        auto batch = supplier->GetNextChunk();
         if (!batch) {
           break;  // No more batches from this supplier
         }
-        totalRows += batch->num_rows();
+        totalRows += batch->row_num();
       }
     }
 

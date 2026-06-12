@@ -79,7 +79,7 @@ neug::result<Context> BatchInsertVertexOpr::Eval(
   }
   ctx.ensure_single_chunk("BatchInsertVertexOpr");
   auto suppliers =
-      create_record_batch_supplier(ctx.chunk(0).chunk(), prop_mappings_);
+      create_data_chunk_supplier(ctx.chunk(0).chunk(), prop_mappings_);
   for (auto supplier : suppliers) {
     RETURN_STATUS_ERROR_IF_NOT_OK(
         graph.BatchAddVertices(vertex_label_id, supplier));

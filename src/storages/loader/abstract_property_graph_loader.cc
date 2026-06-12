@@ -15,7 +15,6 @@
 
 #include "neug/storages/loader/abstract_property_graph_loader.h"
 #include "neug/storages/loader/loader_utils.h"
-#include "neug/utils/arrow_utils.h"
 #include "neug/utils/exception/exception.h"
 
 namespace neug {
@@ -28,7 +27,7 @@ void AbstractPropertyGraphLoader::addVerticesToVertexTable(
     LOG(INFO) << "Start to load vertex label: " << label_name
               << " from file: " << v_file;
     auto suppliers =
-        createVertexRecordBatchSupplier(v_label_id, label_name, v_file, pk_type,
+        createVertexChunkSupplier(v_label_id, label_name, v_file, pk_type,
                                         pk_name, pk_ind, loading_config_, 0);
     for (auto& supplier : suppliers) {
       graph_.BatchAddVertices(v_label_id, supplier);
@@ -116,7 +115,7 @@ void AbstractPropertyGraphLoader::addEdgesToEdgeTable(
     LOG(INFO) << "Start to load edge label: "
               << schema_.get_edge_label_name(e_label_id)
               << " from file: " << e_file;
-    auto suppliers = createEdgeRecordBatchSupplier(
+    auto suppliers = createEdgeChunkSupplier(
         src_label_id, dst_label_id, e_label_id, e_file, loading_config_, 0);
     for (auto& supplier : suppliers) {
       graph_.BatchAddEdges(src_label_id, dst_label_id, e_label_id, supplier);

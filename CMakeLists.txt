@@ -203,7 +203,6 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-uninitialized")
 endif()
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-nonnull ") # brought by arrow
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options(-Wno-restrict) # no restrict until https://gcc.gnu.org/bugzilla/show_bug.cgi?id=105651 is fixed
 endif()
@@ -433,7 +432,7 @@ function(add_neug_test TEST_NAME)
     set(SRCS ${ARGN})
     add_executable(${TEST_NAME} ${SRCS})
     target_link_libraries(${TEST_NAME} PUBLIC neug::GTest neug
-        ${Protobuf_LIBRARIES} ${GLOG_LIBRARIES} ${ARROW_LIB} ${OPENSSL_LIBRARIES} 
+        ${Protobuf_LIBRARIES} ${GLOG_LIBRARIES} ${OPENSSL_LIBRARIES} 
         ${CRYPTO_LIB} ${YAML_CPP_LIBRARIES})
     if (ENABLE_GCOV)
         target_compile_options(${TEST_NAME} PRIVATE --coverage)
@@ -501,6 +500,7 @@ if(POLICY CMP0167)
 endif()
 
 include_directories(SYSTEM third_party/HowardHinnant/date/include)
+include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party/csv-parser)
 
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party)
@@ -586,14 +586,20 @@ endif()
 
 #find arrow----------------------------------------------------------------------
 
-# Always enable Arrow JSON support (built-in).
-# JSON is now a core feature since v0.1.2, not an optional extension.
-set(ARROW_JSON ON CACHE BOOL "" FORCE)
+set(NEUG_NEED_ARROW OFF)
+if(BUILD_EXTENSIONS)
+    if("parquet" IN_LIST BUILD_EXTENSIONS OR "httpfs" IN_LIST BUILD_EXTENSIONS)
+        set(NEUG_NEED_ARROW ON)
+    endif()
+endif()
+
+if(NEUG_NEED_ARROW)
+# -Wno-nonnull is required by Arrow headers; only needed when Arrow is built.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-nonnull ")
 # Use system RapidJSON instead of building it (project already has rapidjson in third_party)
 set(RapidJSON_SOURCE "SYSTEM" CACHE STRING "" FORCE)
 # Point Arrow to use the project's RapidJSON
 set(RapidJSON_ROOT "${CMAKE_SOURCE_DIR}/third_party/rapidjson" CACHE PATH "" FORCE)
-message(STATUS "Arrow JSON support enabled (built-in)")
 
 # Configure Arrow Parquet support if parquet extension is enabled
 if(BUILD_EXTENSIONS AND "parquet" IN_LIST BUILD_EXTENSIONS)
@@ -796,13 +802,15 @@ else()
     build_arrow_as_third_party()
 endif()
 
-# Add Arrow include directories after building
-if(ARROW_INCLUDE_DIRS)
-    include_directories(${ARROW_INCLUDE_DIRS})
-    message(STATUS "Arrow include directories: ${ARROW_INCLUDE_DIRS}")
+    if(ARROW_INCLUDE_DIRS)
+        include_directories(${ARROW_INCLUDE_DIRS})
+        message(STATUS "Arrow include directories: ${ARROW_INCLUDE_DIRS}")
+    endif()
+    message(STATUS "Arrow library: ${ARROW_LIB}")
+else()
+    set(ARROW_LIB "")
+    message(STATUS "Arrow disabled (core build; enable parquet/httpfs extension to link Arrow)")
 endif()
-
-message(STATUS "Arrow library: ${ARROW_LIB}")
 
 # Find Doxygen
 if (BUILD_DOC)

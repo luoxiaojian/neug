@@ -5,6 +5,7 @@ file(GLOB_RECURSE EXECUTION_SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/common/*.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/utils/*.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/extension/*.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/expression/*.cc")
+list(FILTER EXECUTION_SRC_FILES EXCLUDE REGEX ".*/columns/arrow_context_column\\.cc$")
 
 add_library(neug_execution OBJECT ${EXECUTION_SRC_FILES})
 add_dependencies(neug_execution neug_proto)

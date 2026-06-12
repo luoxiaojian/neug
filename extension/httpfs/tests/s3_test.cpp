@@ -30,7 +30,7 @@ static S3FileInfo provideS3(const FileSchema& schema) {
     info.resolvedPaths.insert(info.resolvedPaths.end(), resolved.begin(),
                               resolved.end());
   }
-  info.fileSystem = fs.toArrowFileSystem();
+  info.fileSystem = std::static_pointer_cast<arrow::fs::FileSystem>(fs.getArrowFileSystem());
   return info;
 }
 
@@ -535,7 +535,7 @@ TEST_F(S3ExtensionTest, E2E_AccessOSSPublicParquetFile) {
   LOG(INFO) << "Test: OSS FileSystem initialized successfully";
 
   auto resolvedPaths = fs.glob(schema.paths[0]);
-  auto arrowFs = fs.toArrowFileSystem();
+  auto arrowFs = std::static_pointer_cast<arrow::fs::FileSystem>(fs.getArrowFileSystem());
 
   EXPECT_NE(arrowFs, nullptr);
   EXPECT_FALSE(resolvedPaths.empty());
@@ -820,7 +820,7 @@ TEST_F(S3ExtensionTest, GetFileInfo_AfterGlob) {
   schema.options["CREDENTIALS_KIND"] = "Anonymous";
 
   S3FileSystem fs(schema);
-  auto arrow_fs = fs.toArrowFileSystem();
+  auto arrow_fs = std::static_pointer_cast<arrow::fs::FileSystem>(fs.getArrowFileSystem());
 
   // glob() returns bare paths ready for Arrow FS
   auto resolved = fs.glob(schema.paths[0]);
@@ -844,7 +844,7 @@ TEST_F(S3ExtensionTest, WriteToPublicBucket_ReturnsPermissionError) {
   schema.options["OSS_ENDPOINT"] = "oss-cn-beijing.aliyuncs.com";
 
   S3FileSystem fs(schema);
-  auto arrow_fs = fs.toArrowFileSystem();
+  auto arrow_fs = std::static_pointer_cast<arrow::fs::FileSystem>(fs.getArrowFileSystem());
 
   // Use glob to get bare path (same as production read path)
   // For write, we manually strip since there's no glob step in production
@@ -880,7 +880,7 @@ TEST_F(S3ExtensionTest, WriteAndReadBack_WithDefaultCredentials) {
   schema.options["OSS_ENDPOINT"] = "oss-cn-beijing.aliyuncs.com";
 
   S3FileSystem fs(schema);
-  auto arrow_fs = fs.toArrowFileSystem();
+  auto arrow_fs = std::static_pointer_cast<arrow::fs::FileSystem>(fs.getArrowFileSystem());
 
   // In production, Provide() strips the scheme. Here we use the bare path directly.
   std::string test_path = "graphscope/neug/write_test_output.txt";

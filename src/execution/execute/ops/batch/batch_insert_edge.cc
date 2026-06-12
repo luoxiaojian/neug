@@ -25,7 +25,7 @@
 #include <utility>
 
 namespace neug {
-class IRecordBatchSupplier;
+class IDataChunkSupplier;
 class PropertyGraph;
 
 namespace execution {
@@ -145,7 +145,7 @@ neug::result<Context> BatchInsertEdgeOpr::Eval(
   }
   ctx.ensure_single_chunk("BatchInsertEdgeOpr");
   auto suppliers =
-      create_record_batch_supplier(ctx.chunk(0).chunk(), total_mappings);
+      create_data_chunk_supplier(ctx.chunk(0).chunk(), total_mappings);
 
   for (auto& supplier : suppliers) {
     RETURN_STATUS_ERROR_IF_NOT_OK(graph.BatchAddEdges(

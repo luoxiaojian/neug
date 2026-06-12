@@ -32,6 +32,7 @@
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/property/types.h"
 #include "neug/utils/writer/writer.h"
+#include "parquet/arrow_fs_resolver.h"
 #include "parquet_options.h"
 
 namespace neug {
@@ -451,8 +452,9 @@ static execution::Context parquetExecFunc(
   const auto& vfs = neug::main::MetadataRegistry::getVFS();
   const auto& fs = vfs->Provide(schema);
   
+  auto arrowFs = neug::parquet::resolveArrowFileSystem(*fs);
   auto writer = std::make_shared<neug::writer::ArrowParquetExportWriter>(
-      schema, fs->toArrowFileSystem(), entry_schema);
+      schema, std::move(arrowFs), entry_schema);
   
   auto status = writer->write(ctx, graph);
   if (!status.ok()) {

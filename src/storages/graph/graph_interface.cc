@@ -87,13 +87,13 @@ Status StorageAPUpdateInterface::AddEdge(
 void StorageAPUpdateInterface::CreateCheckpoint() { graph_.Dump(); }
 
 Status StorageAPUpdateInterface::BatchAddVertices(
-    label_t v_label_id, std::shared_ptr<IRecordBatchSupplier> supplier) {
+    label_t v_label_id, std::shared_ptr<IDataChunkSupplier> supplier) {
   return graph_.BatchAddVertices(v_label_id, std::move(supplier));
 }
 
 Status StorageAPUpdateInterface::BatchAddEdges(
     label_t src_label, label_t dst_label, label_t edge_label,
-    std::shared_ptr<IRecordBatchSupplier> supplier) {
+    std::shared_ptr<IDataChunkSupplier> supplier) {
   return graph_.BatchAddEdges(src_label, dst_label, edge_label,
                               std::move(supplier));
 }
