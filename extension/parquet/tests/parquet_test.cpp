@@ -26,13 +26,13 @@
 #include <vector>
 
 #include "neug/compiler/common/case_insensitive_map.h"
-#include "parquet/arrow_context_column.h"
+#include "neug/execution/common/columns/value_columns.h"
 #include "neug/execution/common/context.h"
 #include "neug/generated/proto/plan/basic_type.pb.h"
 #include "neug/utils/exception/exception.h"
-#include "neug/utils/reader/options.h"
-#include "parquet/arrow_reader.h"
-#include "neug/utils/reader/schema.h"
+#include "neug/utils/io/read/common/options.h"
+#include "neug/utils/io/reader.h"
+#include "neug/utils/io/read/common/schema.h"
 
 #include "../../extension/parquet/include/parquet_options.h"
 #include "../../extension/parquet/include/parquet_export_function.h"
@@ -446,8 +446,8 @@ TEST_F(ParquetTest, TestTypeMapping_StringToLargeUtf8) {
   execution::Context ctx;
   reader->read(localState, ctx);
 
-  // Verify string column type
-  auto col1 = ctx.chunk(0).columns()[1];
+  // Verify string column is converted to large_utf8
+  auto col1 = ctx.columns[1];
   ASSERT_EQ(col1->column_type(), execution::ContextColumnType::kValue);
   EXPECT_EQ(col1->elem_type().id(), neug::DataTypeId::kVarchar);
 }
@@ -500,11 +500,10 @@ TEST_F(ParquetTest, TestTypeMapping_PreserveNumericTypes) {
   EXPECT_EQ(ctx.col_num(), 4);
   EXPECT_EQ(ctx.row_num(), 1);
 
-  // Verify types are preserved correctly
-  EXPECT_EQ(ctx.chunk(0).columns()[0]->elem_type().id(), neug::DataTypeId::kInt32);
-  EXPECT_EQ(ctx.chunk(0).columns()[1]->elem_type().id(), neug::DataTypeId::kInt64);
-  EXPECT_EQ(ctx.chunk(0).columns()[2]->elem_type().id(), neug::DataTypeId::kDouble);
-  EXPECT_EQ(ctx.chunk(0).columns()[3]->elem_type().id(), neug::DataTypeId::kBoolean);
+  EXPECT_EQ(ctx.columns[0]->elem_type().id(), neug::DataTypeId::kInt32);
+  EXPECT_EQ(ctx.columns[1]->elem_type().id(), neug::DataTypeId::kInt64);
+  EXPECT_EQ(ctx.columns[2]->elem_type().id(), neug::DataTypeId::kDouble);
+  EXPECT_EQ(ctx.columns[3]->elem_type().id(), neug::DataTypeId::kBoolean);
 }
 
 // =============================================================================
@@ -654,14 +653,15 @@ TEST_F(ParquetTest, TestIntegration_FilterPushdown) {
       << "Should filter to 3 rows with score > 90.0";
   
   // Verify the filtered data
-  auto col1 = ctx.chunk(0).columns()[1];
+  auto col1 = std::dynamic_pointer_cast<execution::ValueColumn>(ctx.columns[1]);
   ASSERT_NE(col1, nullptr);
-  ASSERT_GT(col1->size(), 0u);
-
+  const auto& columns = col1->GetColumns();
+  ASSERT_FALSE(columns.empty());
+  auto scoreArray = std::static_pointer_cast<arrow::DoubleArray>(columns[0]);
+  
   // All scores should be > 90.0
-  for (size_t i = 0; i < col1->size(); ++i) {
-    auto val = col1->get_elem(i);
-    EXPECT_GT(val.GetValue<double>(), 90.0)
+  for (int64_t i = 0; i < scoreArray->length(); ++i) {
+    EXPECT_GT(scoreArray->Value(i), 90.0)
         << "Extension's filter translation should result in all scores > 90.0";
   }
 }
@@ -681,9 +681,11 @@ TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
   execution::Context ctx;
   reader->read(localState, ctx);
 
-  EXPECT_GT(ctx.chunk_num(), 0);  // batch mode: data materialized into chunks
-  EXPECT_GT(ctx.col_num(), 0)
-      << "Extension should materialize data into Context chunks when batch_read=true";
+  EXPECT_EQ(ctx.col_num(), 3);
+  // Verify extension translates batch_read option to streaming column type
+  auto col0 = ctx.columns[0];
+  EXPECT_EQ(col0->column_type(), execution::ContextColumnType::kChunkStream)
+      << "Extension should use ChunkStream column type when batch_read=true";
   
   // Test with batch_read=false (full read mode)
   auto sharedState2 = createSharedState(
@@ -697,7 +699,7 @@ TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
   execution::Context ctx2;
   reader2->read(localState2, ctx2);
 
-  auto col0_2 = ctx2.chunk(0).columns()[0];
+  auto col0_2 = ctx2.columns[0];
   EXPECT_EQ(col0_2->column_type(), execution::ContextColumnType::kValue)
       << "Extension should use Value column type when batch_read=false";
 }
