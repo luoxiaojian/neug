@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-#include "neug/utils/io/reader.h"
+#include "neug/utils/io/read/json/json_reader.h"
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -27,7 +27,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "neug/execution/common/columns/chunk_context_column.h"
 #include "neug/execution/common/columns/columns_utils.h"
 #include "neug/execution/common/context.h"
 #include "neug/execution/common/types/value.h"
@@ -243,8 +242,7 @@ JsonReader::JsonReader(std::shared_ptr<ReadSharedState> sharedState,
 
 JsonReader::~JsonReader() = default;
 
-void JsonReader::read(std::shared_ptr<ReadLocalState> /*localState*/,
-                      execution::Context& ctx) {
+std::shared_ptr<IDataChunkSupplier> JsonReader::read() {
   if (!sharedState_ || !optionsBuilder_) {
     THROW_INVALID_ARGUMENT_EXCEPTION("JsonReader state or builder is null");
   }
@@ -275,15 +273,14 @@ void JsonReader::read(std::shared_ptr<ReadLocalState> /*localState*/,
   }
 
   if (use_batch_read) {
-    batch_read(suppliers, ctx);
-  } else {
-    full_read(suppliers, ctx, config);
+    return batch_read(suppliers);
   }
+  return full_read(suppliers, config);
 }
 
-void JsonReader::full_read(
+std::shared_ptr<IDataChunkSupplier> JsonReader::full_read(
     const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers,
-    execution::Context& output, const JsonReadConfig& output_config) {
+    const JsonReadConfig& output_config) {
   auto merged = read_all_chunks(suppliers);
 
   int expected_cols = sharedState_->columnNum();
@@ -302,33 +299,17 @@ void JsonReader::full_read(
                                  sharedState_->projectColumns.empty()
                                      ? output_config.include_columns
                                      : sharedState_->projectColumns);
-  output.clear();
-  output.append_chunk(std::move(projected));
+  return std::make_shared<ChunkSupplierWrapper>(
+      std::vector<std::shared_ptr<IDataChunkSupplier>>{},
+      std::make_shared<execution::DataChunk>(std::move(projected)));
 }
 
-void JsonReader::batch_read(
-    const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers,
-    execution::Context& output) {
-  std::shared_ptr<IDataChunkSupplier> batch_supplier;
+std::shared_ptr<IDataChunkSupplier> JsonReader::batch_read(
+    const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers) {
   if (suppliers.size() == 1) {
-    batch_supplier = suppliers.front();
-  } else {
-    batch_supplier = std::make_shared<ChunkSupplierWrapper>(suppliers);
+    return suppliers.front();
   }
-
-  int num_cols = sharedState_->columnNum();
-  if (num_cols <= 0) {
-    num_cols =
-        static_cast<int>(optionsBuilder_->build().include_columns.size());
-  }
-
-  output.clear();
-  execution::DataChunk chunk;
-  for (int i = 0; i < num_cols; ++i) {
-    execution::ChunkStreamContextColumnBuilder builder({batch_supplier});
-    chunk.set(i, builder.finish());
-  }
-  output.append_chunk(std::move(chunk));
+  return std::make_shared<ChunkSupplierWrapper>(suppliers);
 }
 
 result<std::shared_ptr<EntrySchema>> JsonReader::inferSchema() {
