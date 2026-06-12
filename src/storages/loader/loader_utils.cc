@@ -30,7 +30,7 @@
 #include "csv.hpp"
 #include "neug/execution/common/columns/columns_utils.h"
 #include "neug/execution/common/types/value.h"
-#include "neug/utils/csv/ldbc_parsers.h"
+#include "neug/utils/io/read/csv/ldbc_parsers.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/string_utils.h"
 

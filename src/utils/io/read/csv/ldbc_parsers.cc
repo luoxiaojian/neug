@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-#include "neug/utils/csv/ldbc_parsers.h"
+#include "neug/utils/io/read/csv/ldbc_parsers.h"
 
 #include <date/date.h>
 #include <cctype>

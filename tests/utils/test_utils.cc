@@ -19,7 +19,7 @@
 #include <gtest/gtest.h>
 
 #include "neug/execution/common/types/value.h"
-#include "neug/utils/csv/ldbc_parsers.h"
+#include "neug/utils/io/read/csv/ldbc_parsers.h"
 #include "neug/utils/bitset.h"
 #include "neug/utils/encoder.h"
 #include "neug/utils/pb_utils.h"
