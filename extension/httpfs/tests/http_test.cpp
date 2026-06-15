@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include <glog/logging.h>
+#include <arrow/buffer.h>
 #include <atomic>
 #include <iomanip>
 #include <thread>

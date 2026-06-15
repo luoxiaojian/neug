@@ -36,6 +36,7 @@
 #include "neug/utils/io/reader.h"
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/io/read/common/type_converter.h"
+#include "neug/utils/io/vfs/file_system.h"
 
 namespace neug {
 namespace test {
@@ -258,8 +259,10 @@ class ReaderTest : public ::testing::Test {
       const std::shared_ptr<reader::ReadSharedState>& sharedState) {
     auto optionsBuilder =
         std::make_unique<reader::CsvOptionsBuilder>(sharedState);
-    return std::make_shared<reader::CsvReader>(sharedState,
-                                               std::move(optionsBuilder));
+    fsys::FileSystemRegistry vfs;
+    return std::make_shared<reader::CsvReader>(
+        sharedState, std::move(optionsBuilder),
+        vfs.Provide(sharedState->schema.file));
   }
 
   std::shared_ptr<reader::FileReader> createArrowReader(

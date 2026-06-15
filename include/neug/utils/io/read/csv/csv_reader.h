@@ -24,14 +24,19 @@
 
 namespace neug {
 
+namespace fsys {
+class FileSystem;
+}
+
 class IDataChunkSupplier;
 
 namespace reader {
 
 class CsvReader : public FileReader {
  public:
-  explicit CsvReader(std::shared_ptr<ReadSharedState> sharedState,
-                     std::unique_ptr<CsvOptionsBuilder> optionsBuilder);
+  CsvReader(std::shared_ptr<ReadSharedState> sharedState,
+            std::unique_ptr<CsvOptionsBuilder> optionsBuilder,
+            std::unique_ptr<fsys::FileSystem> fileSystem);
   ~CsvReader() override;
 
   std::shared_ptr<IDataChunkSupplier> read() override;
@@ -47,6 +52,7 @@ class CsvReader : public FileReader {
 
   std::shared_ptr<ReadSharedState> sharedState_;
   std::unique_ptr<CsvOptionsBuilder> optionsBuilder_;
+  std::unique_ptr<fsys::FileSystem> fileSystem_;
 };
 
 }  // namespace reader

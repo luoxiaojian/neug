@@ -18,6 +18,8 @@
 
 #include <fnmatch.h>
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/result.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,6 +44,44 @@ namespace s3 {
 inline bool MatchGlobPattern(const std::string& text, const std::string& pattern) {
   // flags=0: '*' matches any character including '/', '?' matches any single char
   return fnmatch(pattern.c_str(), text.c_str(), 0) == 0;
+}
+
+/**
+ * @brief Resolve glob patterns against object keys returned by list_keys.
+ *
+ * @param list_keys Lists object keys under list_prefix (relative to bucket).
+ * @param root Bucket name used as path prefix in out_paths.
+ * @param pattern Glob pattern relative to bucket root.
+ */
+inline void ResolvePathsWithGlobOnKeys(
+    const std::function<std::vector<std::string>(const std::string& list_prefix)>&
+        list_keys,
+    const std::string& root, const std::string& pattern,
+    std::vector<std::string>& out_paths,
+    const std::string& original_path_for_error) {
+  std::string base_dir = pattern;
+  size_t wildcard_pos = std::min({
+      base_dir.find('*'), base_dir.find('?'), base_dir.find('[')});
+
+  if (wildcard_pos != std::string::npos) {
+    size_t last_slash = base_dir.rfind('/', wildcard_pos);
+    base_dir = (last_slash != std::string::npos) ? base_dir.substr(0, last_slash)
+                                                 : "";
+  }
+
+  const auto object_keys = list_keys(base_dir);
+  int match_count = 0;
+  for (const auto& key : object_keys) {
+    if (MatchGlobPattern(key, pattern)) {
+      out_paths.push_back(root + "/" + key);
+      match_count++;
+    }
+  }
+
+  if (match_count == 0) {
+    THROW_IO_EXCEPTION("No files matched glob pattern: " +
+                       original_path_for_error);
+  }
 }
 
 /**

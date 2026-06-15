@@ -27,8 +27,10 @@
 #include <vector>
 #include "neug/compiler/common/case_insensitive_map.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/io/stream/input_stream.h"
 #include "neug/utils/io/vfs/file_system.h"
 #include "neug/utils/io/read/common/schema.h"
+#include "http_random_access_file.h"
 
 namespace neug {
 namespace extension {
@@ -60,66 +62,31 @@ struct HTTPURIComponents {
 };
 
 /**
- * HTTP RandomAccessFile implementation using libcurl
- * 
- * Supports:
- * - HTTP Range requests for partial reading
- * - Connection reuse for efficient I/O
- * - TLS/SSL for HTTPS
- * - Authentication via Bearer token or custom headers
+ * Arrow adapter over HttpRandomAccessFile for parquet / Arrow Dataset reads.
  */
 class HTTPRandomAccessFile : public arrow::io::RandomAccessFile {
  public:
-  /**
-   * Create HTTP file handle
-   * 
-   * @param url Full HTTP(S) URL
-   * @param options HTTP options (auth, headers, etc.)
-   */
-  HTTPRandomAccessFile(const std::string& url, 
+  HTTPRandomAccessFile(const std::string& url,
                        const common::case_insensitive_map_t<std::string>& options);
-  
+
+  explicit HTTPRandomAccessFile(std::shared_ptr<HttpRandomAccessFile> impl);
+
   ~HTTPRandomAccessFile() override;
 
-  // arrow::io::RandomAccessFile interface
   arrow::Result<int64_t> Tell() const override;
   arrow::Result<int64_t> GetSize() override;
   arrow::Status Seek(int64_t position) override;
-  arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override;
-  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override;
+  arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes,
+                                void* out) override;
+  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position,
+                                                       int64_t nbytes) override;
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override;
   arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override;
   arrow::Status Close() override;
   bool closed() const override;
 
  private:
-  /**
-   * Perform HTTP Range request
-   * @return Result<int64_t> Number of bytes actually read, or error status
-   */
-  arrow::Result<int64_t> ReadRange(int64_t offset, int64_t length, void* buffer);
-  
-  /**
-   * Initialize file size via HEAD request
-   */
-  arrow::Status InitializeFileSize();
-  
-  /**
-   * Setup CURL handle with common options
-   */
-  void SetupCURLHandle(CURL* curl);
-
-  std::string url_;
-  common::case_insensitive_map_t<std::string> options_;
-  CURL* curl_handle_;
-  int64_t file_size_;
-  int64_t position_;
-  bool closed_;
-  
-  // Authentication
-  std::string bearer_token_;
-  std::vector<std::string> custom_headers_;
-  struct curl_slist* header_list_;
+  std::shared_ptr<HttpRandomAccessFile> impl_;
 };
 
 /**
@@ -185,15 +152,15 @@ class HTTPFileSystem : public arrow::fs::FileSystem, public fsys::FileSystem {
   // HTTP has no directory listing; returns the path unchanged.
   std::vector<std::string> glob(const std::string& path) override;
 
+  std::unique_ptr<io::RandomAccessFile> openInputFile(
+      const std::string& path) override;
+
   // Returns a new HTTPFileSystem instance built from the stored options.
   // Each call produces an independent instance; the caller owns it exclusively.
   std::shared_ptr<void> getArrowFileSystem() override;
 
  private:
   common::case_insensitive_map_t<std::string> options_;
-
-  // Global CURL initialization (shared across all instances).
-  static std::once_flag curl_init_flag_;
 };
 
 /**

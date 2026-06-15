@@ -17,6 +17,7 @@
 #pragma once
 
 #include <functional>
+#include <istream>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -24,6 +25,7 @@
 #include <vector>
 
 #include "neug/utils/io/read/common/read_state.h"
+#include "neug/utils/io/stream/input_stream.h"
 
 namespace neug {
 namespace fsys {
@@ -34,10 +36,17 @@ class FileSystem {
   virtual ~FileSystem() = default;
   // to support path regex patterns, i.e. /path/to/*.csv
   virtual std::vector<std::string> glob(const std::string& path) = 0;
+  /// Opens a file for sequential reading via the protocol backend.
+  virtual std::unique_ptr<io::RandomAccessFile> openInputFile(
+      const std::string& path);
   /// Opaque Arrow filesystem handle for extension readers (parquet/httpfs).
   /// Returns nullptr when the protocol has no Arrow backend (local paths).
   virtual std::shared_ptr<void> getArrowFileSystem() { return nullptr; }
 };
+
+/// Opens path through vfs and returns an istream suitable for csv-parser.
+std::unique_ptr<std::istream> openInputAsIstream(FileSystem& fs,
+                                                 const std::string& path);
 
 using FileSystemFactory =
     std::function<std::unique_ptr<FileSystem>(const reader::FileSchema&)>;

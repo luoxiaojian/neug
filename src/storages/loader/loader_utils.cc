@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <ostream>
@@ -31,6 +32,8 @@
 #include "neug/execution/common/columns/columns_utils.h"
 #include "neug/execution/common/types/value.h"
 #include "neug/utils/io/read/csv/ldbc_parsers.h"
+#include "neug/utils/io/stream/input_stream.h"
+#include "neug/utils/io/vfs/file_system.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/string_utils.h"
 
@@ -241,10 +244,21 @@ void append_csv_field_to_builder(
 
 }  // namespace
 
+std::unique_ptr<std::istream> open_csv_input_stream(
+    fsys::FileSystem* file_system, const std::string& path) {
+  if (file_system != nullptr) {
+    return fsys::openInputAsIstream(*file_system, path);
+  }
+  return io::randomAccessToIstream(io::openLocalInputFile(path));
+}
+
 struct CsvSupplierRuntime {
-  explicit CsvSupplierRuntime(const std::string& file_path,
-                              const CsvReadConfig& config)
-      : file_path_(file_path),
+  using StreamOpener = std::function<std::unique_ptr<std::istream>()>;
+
+  CsvSupplierRuntime(std::string file_path, const CsvReadConfig& config,
+                     StreamOpener opener)
+      : file_path_(std::move(file_path)),
+        opener_(std::move(opener)),
         csv_format_(build_csv_format(config)),
         selected_column_names_(resolve_selected_column_names(config)),
         selected_column_indices_(resolve_selected_column_indices(
@@ -316,7 +330,7 @@ struct CsvSupplierRuntime {
  private:
   void reset_reader() {
     try {
-      reader_ = std::make_unique<csv::CSVReader>(file_path_, csv_format_);
+      reader_ = std::make_unique<csv::CSVReader>(opener_(), csv_format_);
       skip_rows(*reader_);
       current_row_number_ = rows_to_skip_;
     } catch (const std::exception& error) {
@@ -334,9 +348,9 @@ struct CsvSupplierRuntime {
     }
   }
 
-  int64_t count_rows() const {
+  int64_t count_rows() {
     try {
-      csv::CSVReader counter(file_path_, csv_format_);
+      csv::CSVReader counter(opener_(), csv_format_);
       skip_rows(counter);
       int64_t count = 0;
       csv::CSVRow row;
@@ -355,6 +369,7 @@ struct CsvSupplierRuntime {
 
  private:
   std::string file_path_;
+  StreamOpener opener_;
   csv::CSVFormat csv_format_;
   std::vector<std::string> selected_column_names_;
   std::vector<size_t> selected_column_indices_;
@@ -474,45 +489,53 @@ std::string process_header_row_token(const std::string& token, bool is_quoting,
   return new_token;
 }
 
-std::vector<std::string> read_header_manual(const std::string& file_name,
+std::vector<std::string> read_header_manual(std::istream& input,
                                             char delimiter, bool is_quoting,
                                             char quote_char, bool is_escaping,
-                                            char escape_char) {
+                                            char escape_char,
+                                            const std::string& file_name) {
   std::vector<std::string> res_vec;
-  std::ifstream file(file_name);
   std::string line;
-  if (file.is_open()) {
-    if (std::getline(file, line)) {
-      std::stringstream ss(line);
-      std::string token;
-      while (std::getline(ss, token, delimiter)) {
-        size_t endpos = token.find_last_not_of(" \n\r\t");
-        if (endpos == std::string::npos) {
-          token.clear();
-        } else {
-          token.erase(endpos + 1);
-        }
-        token = process_header_row_token(token, is_quoting, quote_char,
-                                         is_escaping, escape_char);
-        res_vec.push_back(token);
+  if (std::getline(input, line)) {
+    std::stringstream ss(line);
+    std::string token;
+    while (std::getline(ss, token, delimiter)) {
+      size_t endpos = token.find_last_not_of(" \n\r\t");
+      if (endpos == std::string::npos) {
+        token.clear();
+      } else {
+        token.erase(endpos + 1);
       }
-    } else {
-      file.close();
-      THROW_IO_EXCEPTION("Fail to read header line of file: " + file_name);
+      token = process_header_row_token(token, is_quoting, quote_char,
+                                       is_escaping, escape_char);
+      res_vec.push_back(token);
     }
-    file.close();
   } else {
-    THROW_IO_EXCEPTION("Fail to open file: " + file_name);
+    THROW_IO_EXCEPTION("Fail to read header line of file: " + file_name);
   }
   return res_vec;
 }
 
-std::vector<std::string> read_header(const std::string& file_name,
+std::vector<std::string> read_header_manual(const std::string& file_name,
+                                            char delimiter, bool is_quoting,
+                                            char quote_char, bool is_escaping,
+                                            char escape_char) {
+  std::ifstream file(file_name);
+  if (!file) {
+    THROW_IO_EXCEPTION("Fail to open file: " + file_name);
+  }
+  return read_header_manual(file, delimiter, is_quoting, quote_char,
+                            is_escaping, escape_char, file_name);
+}
+
+std::vector<std::string> read_header(fsys::FileSystem* file_system,
+                                     const std::string& file_name,
                                      const CsvReadConfig& config) {
   if (config.escaping) {
-    return read_header_manual(file_name, config.delimiter, config.quoting,
+    auto input = open_csv_input_stream(file_system, file_name);
+    return read_header_manual(*input, config.delimiter, config.quoting,
                               config.quote_char, config.escaping,
-                              config.escape_char);
+                              config.escape_char, file_name);
   }
   try {
     csv::CSVFormat csv_format;
@@ -523,7 +546,8 @@ std::vector<std::string> read_header(const std::string& file_name,
       csv_format.quote(false);
     }
     csv_format.no_header();
-    csv::CSVReader reader(file_name, csv_format);
+    auto input = open_csv_input_stream(file_system, file_name);
+    csv::CSVReader reader(std::move(input), csv_format);
     csv::CSVRow row;
     if (!reader.read_row(row)) {
       THROW_IO_EXCEPTION("Fail to read header line of file: " + file_name);
@@ -562,7 +586,7 @@ void deduplicate_column_names(std::vector<std::string>& all_column_names) {
 void put_column_names_option(bool header_row, const std::string& file_path,
                              CsvReadConfig& config, size_t len) {
   if (header_row) {
-    config.column_names = read_header(file_path, config);
+    config.column_names = read_header(nullptr, file_path, config);
     deduplicate_column_names(config.column_names);
   } else {
     config.column_names.resize(len);
@@ -670,10 +694,19 @@ std::vector<std::string> columnMappingsToSelectedCols(
 }
 
 CSVChunkSupplier::CSVChunkSupplier(const std::string& file_path,
-                                     CsvReadConfig config)
+                                   CsvReadConfig config)
+    : CSVChunkSupplier(nullptr, file_path, std::move(config)) {}
+
+CSVChunkSupplier::CSVChunkSupplier(fsys::FileSystem* file_system,
+                                   const std::string& file_path,
+                                   CsvReadConfig config)
     : file_path_(file_path) {
-  runtime_ =
-      std::make_unique<CsvSupplierRuntime>(file_path, config);
+  fsys::FileSystem* fs_ptr = file_system;
+  auto opener = [fs_ptr, path = file_path]() {
+    return open_csv_input_stream(fs_ptr, path);
+  };
+  runtime_ = std::make_unique<CsvSupplierRuntime>(file_path, config,
+                                                    std::move(opener));
   row_num_ = runtime_->row_num();
   VLOG(10) << "Finish init CSVChunkSupplier for file: " << file_path_;
 }

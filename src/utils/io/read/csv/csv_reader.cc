@@ -36,6 +36,7 @@
 #include "neug/utils/io/read/common/options.h"
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/io/read/common/type_converter.h"
+#include "neug/utils/io/vfs/file_system.h"
 #include "neug/utils/result.h"
 
 namespace neug {
@@ -322,9 +323,11 @@ CsvReadConfig read_config_for_supplier(const CsvReadConfig& config) {
 }  // namespace
 
 CsvReader::CsvReader(std::shared_ptr<ReadSharedState> sharedState,
-                     std::unique_ptr<CsvOptionsBuilder> optionsBuilder)
+                     std::unique_ptr<CsvOptionsBuilder> optionsBuilder,
+                     std::unique_ptr<fsys::FileSystem> fileSystem)
     : sharedState_(std::move(sharedState)),
-      optionsBuilder_(std::move(optionsBuilder)) {}
+      optionsBuilder_(std::move(optionsBuilder)),
+      fileSystem_(std::move(fileSystem)) {}
 
 CsvReader::~CsvReader() = default;
 
@@ -357,9 +360,10 @@ std::shared_ptr<IDataChunkSupplier> CsvReader::read() {
 
   std::vector<std::shared_ptr<IDataChunkSupplier>> suppliers;
   suppliers.reserve(paths.size());
+  fsys::FileSystem* fs = fileSystem_.get();
   for (const auto& path : paths) {
     suppliers.push_back(
-        std::make_shared<CSVChunkSupplier>(path, read_config));
+        std::make_shared<CSVChunkSupplier>(fs, path, read_config));
   }
 
   if (use_batch_read) {
@@ -426,15 +430,20 @@ result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
           sharedState_->schema.file.options);
 
   if (config.column_names.empty() && !autogenerate) {
-    config.column_names = read_header(paths[0], config);
+    config.column_names =
+        read_header(fileSystem_.get(), paths[0], config);
   } else if (config.column_names.empty() && autogenerate) {
-    std::ifstream input(paths[0]);
+    if (!fileSystem_) {
+      RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
+                          "FileSystem is null");
+    }
+    auto input = fsys::openInputAsIstream(*fileSystem_, paths[0]);
     if (!input) {
       RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,
                           "Failed to open CSV file for schema inference");
     }
     std::string line;
-    if (!std::getline(input, line)) {
+    if (!std::getline(*input, line)) {
       RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,
                           "Failed to read first row for schema inference");
     }
@@ -466,7 +475,8 @@ result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
     sniff_config.column_types[name] = DataType(DataTypeId::kVarchar);
   }
 
-  auto supplier = std::make_shared<CSVChunkSupplier>(paths[0], sniff_config);
+  auto supplier = std::make_shared<CSVChunkSupplier>(fileSystem_.get(),
+                                                     paths[0], sniff_config);
   auto sample_chunk = supplier->GetNextChunk();
   if (!sample_chunk) {
     RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,

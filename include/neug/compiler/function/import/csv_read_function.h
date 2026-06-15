@@ -116,7 +116,7 @@ struct CSVReadFunction {
       std::shared_ptr<reader::ReadSharedState> state) {
     validateAndConvertExecOptions(state);
     const auto& vfs = neug::main::MetadataRegistry::getVFS();
-    const auto& fs = vfs->Provide(state->schema.file);
+    auto fs = vfs->Provide(state->schema.file);
     auto resolvedPaths = std::vector<std::string>();
     for (const auto& path : state->schema.file.paths) {
       const auto& resolved = fs->glob(path);
@@ -129,7 +129,8 @@ struct CSVReadFunction {
     const size_t fallback_column_count =
         optionsBuilder->build().include_columns.size();
     std::unique_ptr<reader::FileReader> reader =
-        std::make_unique<reader::CsvReader>(state, std::move(optionsBuilder));
+        std::make_unique<reader::CsvReader>(state, std::move(optionsBuilder),
+                                            std::move(fs));
     return reader::runFileReader(std::move(reader), *state,
                                    fallback_column_count);
   }
@@ -146,7 +147,7 @@ struct CSVReadFunction {
     externalSchema.file.options["BATCH_SIZE"] =
         std::to_string(reader::kSniffBlockSize);
     const auto& vfs = neug::main::MetadataRegistry::getVFS();
-    const auto& fs = vfs->Provide(state->schema.file);
+    auto fs = vfs->Provide(state->schema.file);
     auto resolvedPaths = std::vector<std::string>();
     for (const auto& path : state->schema.file.paths) {
       const auto& resolved = fs->glob(path);
@@ -157,7 +158,8 @@ struct CSVReadFunction {
     auto optionsBuilder =
         std::make_unique<reader::CsvOptionsBuilder>(state);
     std::shared_ptr<reader::FileReader> reader =
-        std::make_shared<reader::CsvReader>(state, std::move(optionsBuilder));
+        std::make_shared<reader::CsvReader>(state, std::move(optionsBuilder),
+                                            std::move(fs));
     auto sniffer = std::make_shared<reader::ReaderSniffer>(reader);
     auto sniffResult = sniffer->sniff();
     if (sniffResult) {
@@ -176,7 +178,8 @@ struct CSVReadFunction {
       auto optionsBuilder2 =
           std::make_unique<reader::CsvOptionsBuilder>(state);
       std::shared_ptr<reader::FileReader> reader2 =
-          std::make_shared<reader::CsvReader>(state, std::move(optionsBuilder2));
+          std::make_shared<reader::CsvReader>(state, std::move(optionsBuilder2),
+                                              vfs->Provide(state->schema.file));
       auto sniffer2 = std::make_shared<reader::ReaderSniffer>(reader2);
       sniffResult = sniffer2->sniff();
       if (sniffResult) {

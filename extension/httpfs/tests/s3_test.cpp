@@ -2,16 +2,18 @@
  * OSS Integration tests for S3 extension
  */
 
-#include "gtest/gtest.h"
+#include <gtest/gtest.h>
 #include <glog/logging.h>
-#include "s3_filesystem.h"
-#include "glob_utils.h"
-#include "neug/utils/io/read/common/schema.h"
-#include "neug/utils/io/read/common/options.h"
-#include "neug/utils/exception/exception.h"
+#include <arrow/buffer.h>
 #include <arrow/filesystem/s3fs.h>
 #include <cstdlib>
 #include <iomanip>
+
+#include "glob_utils.h"
+#include "s3_filesystem.h"
+#include "neug/utils/exception/exception.h"
+#include "neug/utils/io/read/common/options.h"
+#include "neug/utils/io/read/common/schema.h"
 
 using neug::extension::s3::S3FileSystem;
 using neug::extension::s3::S3URIComponents;
@@ -20,7 +22,7 @@ using neug::reader::FileSchema;
 // Helper: build resolved paths + arrow FS from a schema via the new interface.
 struct S3FileInfo {
   std::vector<std::string> resolvedPaths;
-  std::unique_ptr<arrow::fs::FileSystem> fileSystem;
+  std::shared_ptr<arrow::fs::FileSystem> fileSystem;
 };
 static S3FileInfo provideS3(const FileSchema& schema) {
   S3FileSystem fs(schema);
@@ -30,7 +32,8 @@ static S3FileInfo provideS3(const FileSchema& schema) {
     info.resolvedPaths.insert(info.resolvedPaths.end(), resolved.begin(),
                               resolved.end());
   }
-  info.fileSystem = std::static_pointer_cast<arrow::fs::FileSystem>(fs.getArrowFileSystem());
+  info.fileSystem = std::static_pointer_cast<arrow::fs::FileSystem>(
+      fs.getArrowFileSystem());
   return info;
 }
 
