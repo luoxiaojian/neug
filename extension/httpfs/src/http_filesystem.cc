@@ -401,7 +401,7 @@ std::unique_ptr<io::RandomAccessFile> HTTPFileSystem::openInputFile(
   return std::make_unique<HttpRandomAccessFile>(path, options_);
 }
 
-std::shared_ptr<void> HTTPFileSystem::getArrowFileSystem() {
+std::shared_ptr<void> HTTPFileSystem::getArrowFileSystem() const {
   return std::static_pointer_cast<void>(
       std::shared_ptr<arrow::fs::FileSystem>(
           std::make_shared<HTTPFileSystem>(options_)));

@@ -48,7 +48,7 @@ class LocalFileSystem : public FileSystem {
     return neug::execution::ops::match_files_with_pattern(path);
   }
 
-  std::shared_ptr<void> getArrowFileSystem() override { return nullptr; }
+  std::shared_ptr<void> getArrowFileSystem() const override { return nullptr; }
 
   std::unique_ptr<io::RandomAccessFile> openInputFile(
       const std::string& path) override {

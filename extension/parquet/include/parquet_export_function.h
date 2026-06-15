@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <arrow/filesystem/filesystem.h>
 #include <arrow/io/file.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/properties.h>

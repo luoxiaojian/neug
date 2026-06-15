@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include <arrow/array.h>
+#include <arrow/type.h>
 #include <glog/logging.h>
 #include <stddef.h>
 

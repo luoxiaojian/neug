@@ -63,11 +63,6 @@ if(ARROW_INCLUDE_DIRS)
     target_include_directories(neug_httpfs_extension PRIVATE SYSTEM ${ARROW_INCLUDE_DIRS})
 endif()
 
-# The S3 filesystem support (arrow/filesystem/s3fs.h) is compiled into
-# ARROW_BASE_LIB when ARROW_S3=ON, so no additional Arrow component is needed.
-# cURL is required for HTTP/HTTPS filesystem support.
-# IMPORTANT: neug (shared library) MUST come AFTER all Arrow static archives.
-# See extension/parquet/CMakeLists.txt for detailed explanation.
 target_link_libraries(neug_httpfs_extension PRIVATE
     ${ARROW_BASE_LIB}
     ${ARROW_BUNDLED_DEPS_LIB}

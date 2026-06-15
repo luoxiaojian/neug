@@ -39,7 +39,7 @@ namespace neug {
 namespace writer {
 
 // Parse writer options and build WriterProperties
-static std::shared_ptr<parquet::WriterProperties> buildWriterProperties(
+static std::shared_ptr<::parquet::WriterProperties> buildWriterProperties(
     const common::case_insensitive_map_t<std::string>& options) {
   reader::ParquetExportOptions export_options;
   
@@ -81,7 +81,7 @@ static std::shared_ptr<parquet::WriterProperties> buildWriterProperties(
             << ", dictionary_encoding=" << dictionary_encoding;
   
   // Build WriterProperties
-  parquet::WriterProperties::Builder builder;
+  ::parquet::WriterProperties::Builder builder;
   builder.compression(compression);
   builder.max_row_group_length(row_group_size);
   
@@ -389,7 +389,7 @@ neug::Status ArrowParquetExportWriter::writeTable(const QueryResponse* table) {
     // 3. Create Parquet writer with options
     auto properties = buildWriterProperties(schema_.options);
     
-    auto writer_result = parquet::arrow::FileWriter::Open(
+    auto writer_result = ::parquet::arrow::FileWriter::Open(
         *arrow_schema, arrow::default_memory_pool(), outfile, properties);
     if (!writer_result.ok()) {
       return neug::Status(neug::StatusCode::ERR_IO_ERROR,
@@ -452,7 +452,7 @@ static execution::Context parquetExecFunc(
   const auto& vfs = neug::main::MetadataRegistry::getVFS();
   const auto& fs = vfs->Provide(schema);
   
-  auto arrowFs = neug::parquet::resolveArrowFileSystem(*fs);
+  auto arrowFs = neug::parquet_vfs::resolveArrowFileSystem(*fs);
   auto writer = std::make_shared<neug::writer::ArrowParquetExportWriter>(
       schema, std::move(arrowFs), entry_schema);
   

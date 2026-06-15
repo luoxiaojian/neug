@@ -22,10 +22,10 @@ namespace fsys {
 class FileSystem;
 }
 
-namespace parquet {
+namespace parquet_vfs {
 
 std::shared_ptr<arrow::fs::FileSystem> resolveArrowFileSystem(
     const fsys::FileSystem& fs);
 
-}  // namespace parquet
+}  // namespace parquet_vfs
 }  // namespace neug

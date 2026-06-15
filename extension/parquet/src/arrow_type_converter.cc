@@ -5,6 +5,9 @@
 
 #include "neug/utils/exception/exception.h"
 
+namespace neug {
+namespace reader {
+
 std::shared_ptr<arrow::DataType> ArrowTypeConverter::convert(
     const ::common::DataType& type) {
   switch (type.item_case()) {
@@ -216,3 +219,6 @@ std::shared_ptr<::common::DataType> ArrowTypeConverter::convert(
 
   return commonType;
 }
+
+}  // namespace reader
+}  // namespace neug

@@ -49,7 +49,7 @@ class S3FileSystem : public fsys::FileSystem {
   std::unique_ptr<io::RandomAccessFile> openInputFile(
       const std::string& path) override;
 
-  std::shared_ptr<void> getArrowFileSystem() override;
+  std::shared_ptr<void> getArrowFileSystem() const override;
 
   static arrow::fs::S3Options buildS3Options(const reader::FileSchema& schema);
 

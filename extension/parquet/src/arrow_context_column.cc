@@ -19,6 +19,7 @@
 #include <arrow/array/builder_binary.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/array/builder_time.h>
+#include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <glog/logging.h>
 #include <unordered_map>

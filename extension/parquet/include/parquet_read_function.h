@@ -24,7 +24,6 @@
 #include "neug/utils/io/read/common/reader_utils.h"
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/io/read/common/sniffer.h"
-#include "parquet/arrow_fs_resolver.h"
 #include "parquet/arrow_reader.h"
 #include "parquet/arrow_sniffer.h"
 #include "parquet_options.h"
@@ -49,7 +48,7 @@ struct ParquetReadFunction {
   static execution::Context execFunc(
       std::shared_ptr<reader::ReadSharedState> state) {
     const auto& vfs = neug::main::MetadataRegistry::getVFS();
-    const auto& fs = vfs->Provide(state->schema.file);
+    auto fs = vfs->Provide(state->schema.file);
     auto resolvedPaths = std::vector<std::string>();
     for (const auto& path : state->schema.file.paths) {
       const auto& resolved = fs->glob(path);
@@ -59,13 +58,12 @@ struct ParquetReadFunction {
     state->schema.file.paths = std::move(resolvedPaths);
 
     auto optionsBuilder =
-        std::make_unique<reader::ArrowParquetOptionsBuilder>(state);
+        std::make_unique<reader::ParquetOptionsBuilder>(state);
     const size_t fallback_column_count = state->columnNum();
 
-    auto arrowFs = parquet::resolveArrowFileSystem(*fs);
     std::unique_ptr<reader::FileReader> reader =
         std::make_unique<reader::ArrowReader>(
-            state, std::move(optionsBuilder), std::move(arrowFs));
+            state, std::move(optionsBuilder), std::move(fs));
     return reader::runFileReader(std::move(reader), *state,
                                  fallback_column_count);
   }
@@ -81,7 +79,7 @@ struct ParquetReadFunction {
         std::to_string(reader::kSniffBlockSize);
 
     const auto& vfs = neug::main::MetadataRegistry::getVFS();
-    const auto& fs = vfs->Provide(state->schema.file);
+    auto fs = vfs->Provide(state->schema.file);
     auto resolvedPaths = std::vector<std::string>();
     for (const auto& path : state->schema.file.paths) {
       const auto& resolved = fs->glob(path);
@@ -91,11 +89,10 @@ struct ParquetReadFunction {
     state->schema.file.paths = std::move(resolvedPaths);
 
     auto optionsBuilder =
-        std::make_unique<reader::ArrowParquetOptionsBuilder>(state);
+        std::make_unique<reader::ParquetOptionsBuilder>(state);
 
-    auto arrowFs = parquet::resolveArrowFileSystem(*fs);
     auto reader = std::make_shared<reader::ArrowReader>(
-        state, std::move(optionsBuilder), std::move(arrowFs));
+        state, std::move(optionsBuilder), std::move(fs));
 
     auto sniffer = std::make_shared<reader::ArrowSniffer>(reader);
     auto sniffResult = sniffer->sniff();

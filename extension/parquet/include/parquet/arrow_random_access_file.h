@@ -12,24 +12,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#pragma once
 
-#include "parquet/arrow_fs_resolver.h"
-
-#include <arrow/filesystem/localfs.h>
 #include <memory>
 
-#include "neug/utils/io/vfs/file_system.h"
+#include <arrow/io/interfaces.h>
+
+#include "neug/utils/io/stream/input_stream.h"
 
 namespace neug {
-namespace parquet_vfs {
+namespace parquet_adapt {
 
-std::shared_ptr<arrow::fs::FileSystem> resolveArrowFileSystem(
-    const fsys::FileSystem& fs) {
-  if (auto opaque = fs.getArrowFileSystem()) {
-    return std::static_pointer_cast<arrow::fs::FileSystem>(opaque);
-  }
-  return std::make_shared<arrow::fs::LocalFileSystem>();
-}
+/// Adapts core io::RandomAccessFile to arrow::io::RandomAccessFile for libparquet.
+std::shared_ptr<arrow::io::RandomAccessFile> wrapRandomAccessFile(
+    std::unique_ptr<io::RandomAccessFile> file);
 
-}  // namespace parquet_vfs
+}  // namespace parquet_adapt
 }  // namespace neug

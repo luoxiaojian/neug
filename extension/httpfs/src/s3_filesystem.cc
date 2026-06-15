@@ -253,7 +253,7 @@ void S3FileSystem::ensureArrowFileSystem() const {
   arrow_fs_ = *fs_result;
 }
 
-std::shared_ptr<void> S3FileSystem::getArrowFileSystem() {
+std::shared_ptr<void> S3FileSystem::getArrowFileSystem() const {
   ensureArrowFileSystem();
   return std::static_pointer_cast<void>(
       std::shared_ptr<arrow::fs::FileSystem>(

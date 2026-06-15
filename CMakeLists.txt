@@ -607,7 +607,7 @@ if(BUILD_EXTENSIONS AND "parquet" IN_LIST BUILD_EXTENSIONS)
     message(STATUS "Arrow Parquet support enabled for parquet extension")
 endif()
 
-# Configure Arrow S3 support if httpfs extension is enabled
+# Configure Arrow S3 when httpfs is enabled (legacy Arrow adapters in httpfs).
 if(BUILD_EXTENSIONS AND "httpfs" IN_LIST BUILD_EXTENSIONS)
     set(ARROW_ENABLE_S3 ON CACHE BOOL "" FORCE)
     message(STATUS "Arrow S3 support enabled for httpfs extension")

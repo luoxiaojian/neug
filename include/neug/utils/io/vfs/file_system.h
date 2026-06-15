@@ -41,7 +41,7 @@ class FileSystem {
       const std::string& path);
   /// Opaque Arrow filesystem handle for extension readers (parquet/httpfs).
   /// Returns nullptr when the protocol has no Arrow backend (local paths).
-  virtual std::shared_ptr<void> getArrowFileSystem() { return nullptr; }
+  virtual std::shared_ptr<void> getArrowFileSystem() const { return nullptr; }
 };
 
 /// Opens path through vfs and returns an istream suitable for csv-parser.

@@ -16,18 +16,13 @@
 
 #pragma once
 
-#include <arrow/dataset/dataset.h>
-#include <arrow/dataset/file_base.h>
-#include <arrow/dataset/file_parquet.h>
-#include <memory>
-#include "parquet/arrow_options.h"
+#include <parquet/properties.h>
+
+#include "neug/utils/io/read/common/options.h"
 
 namespace neug {
 namespace reader {
 
-/**
- * @brief Parquet-specific parse options
- */
 struct ParquetParseOptions {
   Option<bool> buffered_stream =
       Option<bool>::BoolOption("BUFFERED_STREAM", true);
@@ -39,9 +34,6 @@ struct ParquetParseOptions {
       Option<int64_t>::Int64Option("PARQUET_BATCH_ROWS", 65536);
 };
 
-/**
- * @brief Parquet export options
- */
 struct ParquetExportOptions {
   Option<std::string> compression =
       Option<std::string>::StringOption("COMPRESSION", "snappy");
@@ -51,22 +43,21 @@ struct ParquetExportOptions {
       Option<bool>::BoolOption("DICTIONARY_ENCODING", true);
 };
 
-/**
- * @brief Parquet-specific implementation of Arrow scan options builder
- */
-class ArrowParquetOptionsBuilder : public ArrowOptionsBuilder {
+/// libparquet reader configuration (no Arrow Dataset).
+struct ParquetReadOptions {
+  std::shared_ptr<::parquet::ReaderProperties> reader_properties;
+  std::shared_ptr<::parquet::ArrowReaderProperties> arrow_reader_properties;
+};
+
+class ParquetOptionsBuilder {
  public:
-  explicit ArrowParquetOptionsBuilder(std::shared_ptr<ReadSharedState> state)
-      : ArrowOptionsBuilder(state){};
+  explicit ParquetOptionsBuilder(std::shared_ptr<ReadSharedState> state)
+      : state_(std::move(state)) {}
 
-  virtual ArrowOptions build() const override;
+  ParquetReadOptions build() const;
 
- protected:
-  std::shared_ptr<arrow::dataset::FragmentScanOptions> buildFragmentOptions()
-      const;
-
-  std::shared_ptr<arrow::dataset::FileFormat> buildFileFormat(
-      const arrow::dataset::ScanOptions& options) const;
+ private:
+  std::shared_ptr<ReadSharedState> state_;
 };
 
 }  // namespace reader
