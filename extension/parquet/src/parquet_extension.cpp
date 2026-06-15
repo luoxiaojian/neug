@@ -17,8 +17,10 @@
 #include "neug/compiler/extension/extension_api.h"
 #include "neug/utils/exception/exception.h"
 
-#include "parquet_export_function.h"
 #include "parquet_read_function.h"
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
+#include "parquet_export_function.h"
+#endif
 
 extern "C" {
 
@@ -26,15 +28,15 @@ void Init() {
   LOG(INFO) << "[parquet extension] init called";
 
   try {
-    // Register Parquet read function (based on ReadFunction pattern)
     neug::extension::ExtensionAPI::registerFunction<
         neug::function::ParquetReadFunction>(
         neug::catalog::CatalogEntryType::TABLE_FUNCTION_ENTRY);
 
-    // Register Parquet export function (COPY_PARQUET)
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
     neug::extension::ExtensionAPI::registerFunction<
         neug::function::ExportParquetFunction>(
         neug::catalog::CatalogEntryType::TABLE_FUNCTION_ENTRY);
+#endif
 
     neug::extension::ExtensionAPI::registerExtension(
         neug::extension::ExtensionInfo{

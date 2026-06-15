@@ -19,21 +19,17 @@
 #include <glog/logging.h>
 #include <parquet/arrow/reader.h>
 
-#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "neug/execution/common/data_chunk.h"
-#include "neug/storages/loader/loader_utils.h"
 #include "neug/utils/exception/exception.h"
-#include "neug/utils/io/read/common/options.h"
-#include "neug/utils/io/read/common/row_expression_filter.h"
 #include "neug/utils/result.h"
 #include "parquet/arrow_context_column.h"
+#include "parquet/arrow_parquet_decoder.h"
 #include "parquet/arrow_random_access_file.h"
-#include "parquet/arrow_reader.h"
 #include "parquet/arrow_type_converter.h"
 #include "parquet/record_batch_supplier.h"
 
@@ -119,6 +115,38 @@ execution::DataChunk tableToValueDataChunk(
   return chunk;
 }
 
+result<std::shared_ptr<EntrySchema>> convertArrowSchemaToEntrySchema(
+    const std::shared_ptr<arrow::Schema>& arrow_schema) {
+  if (!arrow_schema) {
+    RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
+                        "Arrow schema is null");
+  }
+
+  auto entry_schema = std::make_shared<TableEntrySchema>();
+  ArrowTypeConverter converter;
+  const int num_fields = arrow_schema->num_fields();
+
+  entry_schema->columnNames.reserve(num_fields);
+  entry_schema->columnTypes.reserve(num_fields);
+
+  for (int i = 0; i < num_fields; ++i) {
+    const auto& field = arrow_schema->field(i);
+    const std::string& column_name = field->name();
+
+    entry_schema->columnNames.push_back(column_name);
+
+    auto common_type = converter.convert(*field->type());
+    if (!common_type) {
+      RETURN_STATUS_ERROR(
+          neug::StatusCode::ERR_TYPE_CONVERSION,
+          "Failed to convert Arrow type for column: " + column_name);
+    }
+    entry_schema->columnTypes.push_back(std::move(common_type));
+  }
+
+  return entry_schema;
+}
+
 class ParquetFileChunkSupplier : public IDataChunkSupplier {
  public:
   ParquetFileChunkSupplier(fsys::FileSystem* fs, std::string path,
@@ -153,7 +181,7 @@ class ParquetFileChunkSupplier : public IDataChunkSupplier {
         auto status = reader_->ReadTable(column_indices_, &table);
         if (!status.ok()) {
           THROW_IO_EXCEPTION("Failed to read Parquet table from " + path_ +
-                               ": " + status.ToString());
+                             ": " + status.ToString());
         }
         cached_chunk_ =
             std::make_shared<execution::DataChunk>(tableToValueDataChunk(table));
@@ -195,162 +223,17 @@ class ParquetFileChunkSupplier : public IDataChunkSupplier {
   std::shared_ptr<execution::DataChunk> cached_chunk_;
 };
 
-class TransformingChunkSupplier : public IDataChunkSupplier {
- public:
-  TransformingChunkSupplier(
-      std::shared_ptr<IDataChunkSupplier> inner,
-      std::shared_ptr<::common::Expression> filter_expr,
-      std::vector<std::string> column_names,
-      std::vector<std::string> project_columns)
-      : inner_(std::move(inner)),
-        filter_expr_(std::move(filter_expr)),
-        column_names_(std::move(column_names)),
-        project_columns_(std::move(project_columns)) {}
-
-  std::shared_ptr<execution::DataChunk> GetNextChunk() override {
-    while (true) {
-      auto chunk = inner_->GetNextChunk();
-      if (!chunk) {
-        return nullptr;
-      }
-      auto filtered =
-          filter_chunk(*chunk, filter_expr_, column_names_);
-      auto projected = project_chunk(filtered, column_names_, project_columns_);
-      if (projected.row_num() == 0 && filter_expr_) {
-        continue;
-      }
-      return std::make_shared<execution::DataChunk>(std::move(projected));
-    }
-  }
-
-  int64_t RowNum() const override { return inner_->RowNum(); }
-
- private:
-  std::shared_ptr<IDataChunkSupplier> inner_;
-  std::shared_ptr<::common::Expression> filter_expr_;
-  std::vector<std::string> column_names_;
-  std::vector<std::string> project_columns_;
-};
-
-std::shared_ptr<IDataChunkSupplier> maybeWrapTransform(
-    std::shared_ptr<IDataChunkSupplier> supplier,
-    const ReadSharedState& state,
-    const std::vector<std::string>& file_column_names) {
-  if (!state.skipRows && state.projectColumns.empty()) {
-    return supplier;
-  }
-  return std::make_shared<TransformingChunkSupplier>(
-      std::move(supplier), state.skipRows, file_column_names,
-      state.projectColumns);
-}
-
 }  // namespace
 
-std::shared_ptr<IDataChunkSupplier> ArrowReader::read() {
-  if (!sharedState_) {
-    THROW_INVALID_ARGUMENT_EXCEPTION("SharedState is null");
-  }
-  if (!fileSystem_) {
-    THROW_INVALID_ARGUMENT_EXCEPTION("FileSystem is null");
-  }
-  if (!optionsBuilder_) {
-    THROW_INVALID_ARGUMENT_EXCEPTION("Options builder is null");
-  }
-
-  const auto& fileSchema = sharedState_->schema.file;
-  const auto& file_paths = fileSchema.paths;
-  if (file_paths.empty()) {
-    THROW_INVALID_ARGUMENT_EXCEPTION("No file paths provided");
-  }
-
-  auto options = optionsBuilder_->build();
-  ReadOptions read_options;
-  const bool use_batch_read = read_options.batch_read.get(fileSchema.options);
-
-  auto first_reader = openParquetFileReader(*fileSystem_, file_paths.front(),
-                                            options);
-  std::shared_ptr<arrow::Schema> file_schema;
-  auto schema_status = first_reader->GetSchema(&file_schema);
-  if (!schema_status.ok()) {
-    THROW_IO_EXCEPTION("Failed to read Parquet schema: " +
-                       schema_status.ToString());
-  }
-
-  const auto read_column_names = resolveReadColumnNames(*sharedState_, file_schema);
-  const auto column_indices =
-      resolveReadColumnIndices(file_schema, read_column_names);
-
-  std::vector<std::shared_ptr<IDataChunkSupplier>> suppliers;
-  suppliers.reserve(file_paths.size());
-  for (const auto& path : file_paths) {
-    suppliers.push_back(std::make_shared<ParquetFileChunkSupplier>(
-        fileSystem_.get(), path, options, column_indices, use_batch_read));
-  }
-
-  if (use_batch_read) {
-    auto supplier = batch_read(suppliers);
-    return maybeWrapTransform(std::move(supplier), *sharedState_,
-                              read_column_names);
-  }
-  return full_read(suppliers, read_column_names);
-}
-
-std::shared_ptr<IDataChunkSupplier> ArrowReader::full_read(
-    const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers,
-    const std::vector<std::string>& file_column_names) {
-  auto merged = read_all_chunks(suppliers);
-
-  int expected_cols = sharedState_->columnNum();
-  if (expected_cols > 0 &&
-      static_cast<int>(merged.col_num()) != expected_cols &&
-      sharedState_->projectColumns.empty()) {
-    THROW_IO_EXCEPTION(
-        "Column number mismatch between schema and Parquet data, schema: " +
-        std::to_string(expected_cols) + ", data: " +
-        std::to_string(merged.col_num()));
-  }
-
-  auto filtered =
-      filter_chunk(merged, sharedState_->skipRows, file_column_names);
-  auto projected = project_chunk(filtered, file_column_names,
-                                 sharedState_->projectColumns.empty()
-                                     ? file_column_names
-                                     : sharedState_->projectColumns);
-  return std::make_shared<ChunkSupplierWrapper>(
-      std::vector<std::shared_ptr<IDataChunkSupplier>>{},
-      std::make_shared<execution::DataChunk>(std::move(projected)));
-}
-
-std::shared_ptr<IDataChunkSupplier> ArrowReader::batch_read(
-    const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers) {
-  if (suppliers.size() == 1) {
-    return suppliers.front();
-  }
-  return std::make_shared<ChunkSupplierWrapper>(suppliers);
-}
-
-result<std::shared_ptr<EntrySchema>> ArrowReader::inferSchema() {
-  if (!sharedState_) {
-    RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
-                        "SharedState is null");
-  }
-  if (!fileSystem_) {
-    RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
-                        "FileSystem is null");
-  }
-  if (!optionsBuilder_) {
-    RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
-                        "Options builder is null");
-  }
-
-  const auto& file_paths = sharedState_->schema.file.paths;
-  if (file_paths.empty()) {
+result<std::shared_ptr<EntrySchema>> ArrowParquetDecoder::inferSchema(
+    fsys::FileSystem& fs, const std::vector<std::string>& paths,
+    const ParquetReadOptions& options) {
+  if (paths.empty()) {
     RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
                         "No file paths provided");
   }
 
-  auto options = optionsBuilder_->build();
-  auto reader = openParquetFileReader(*fileSystem_, file_paths.front(), options);
+  auto reader = openParquetFileReader(fs, paths.front(), options);
   std::shared_ptr<arrow::Schema> arrow_schema;
   auto status = reader->GetSchema(&arrow_schema);
   if (!status.ok()) {
@@ -361,36 +244,35 @@ result<std::shared_ptr<EntrySchema>> ArrowReader::inferSchema() {
   return convertArrowSchemaToEntrySchema(arrow_schema);
 }
 
-result<std::shared_ptr<EntrySchema>> ArrowReader::convertArrowSchemaToEntrySchema(
-    const std::shared_ptr<arrow::Schema>& arrowSchema) {
-  if (!arrowSchema) {
-    RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
-                        "Arrow schema is null");
+std::vector<std::shared_ptr<IDataChunkSupplier>>
+ArrowParquetDecoder::openSuppliers(fsys::FileSystem& fs,
+                                   const ReadSharedState& state,
+                                   const ParquetReadOptions& options,
+                                   bool batch_read) {
+  const auto& file_paths = state.schema.file.paths;
+  if (file_paths.empty()) {
+    THROW_INVALID_ARGUMENT_EXCEPTION("No file paths provided");
   }
 
-  auto entrySchema = std::make_shared<TableEntrySchema>();
-  ArrowTypeConverter converter;
-  int numFields = arrowSchema->num_fields();
-
-  entrySchema->columnNames.reserve(numFields);
-  entrySchema->columnTypes.reserve(numFields);
-
-  for (int i = 0; i < numFields; ++i) {
-    const auto& field = arrowSchema->field(i);
-    const std::string& columnName = field->name();
-
-    entrySchema->columnNames.push_back(columnName);
-
-    auto commonType = converter.convert(*field->type());
-    if (!commonType) {
-      RETURN_STATUS_ERROR(
-          neug::StatusCode::ERR_TYPE_CONVERSION,
-          "Failed to convert Arrow type for column: " + columnName);
-    }
-    entrySchema->columnTypes.push_back(std::move(commonType));
+  auto first_reader = openParquetFileReader(fs, file_paths.front(), options);
+  std::shared_ptr<arrow::Schema> file_schema;
+  auto schema_status = first_reader->GetSchema(&file_schema);
+  if (!schema_status.ok()) {
+    THROW_IO_EXCEPTION("Failed to read Parquet schema: " +
+                       schema_status.ToString());
   }
 
-  return entrySchema;
+  const auto read_column_names = resolveReadColumnNames(state, file_schema);
+  const auto column_indices =
+      resolveReadColumnIndices(file_schema, read_column_names);
+
+  std::vector<std::shared_ptr<IDataChunkSupplier>> suppliers;
+  suppliers.reserve(file_paths.size());
+  for (const auto& path : file_paths) {
+    suppliers.push_back(std::make_shared<ParquetFileChunkSupplier>(
+        &fs, path, options, column_indices, batch_read));
+  }
+  return suppliers;
 }
 
 }  // namespace reader

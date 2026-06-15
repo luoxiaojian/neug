@@ -12,6 +12,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#pragma once
 
 #include "parquet/parquet_sniffer.h"
+
+#include "neug/utils/result.h"
+
+namespace neug {
+namespace reader {
+
+result<std::shared_ptr<EntrySchema>> ParquetSniffer::sniff() {
+  if (!reader_) {
+    RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
+                        "ParquetReader is null");
+  }
+  return reader_->inferSchema();
+}
+
+}  // namespace reader
+}  // namespace neug

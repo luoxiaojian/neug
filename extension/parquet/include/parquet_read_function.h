@@ -24,8 +24,8 @@
 #include "neug/utils/io/read/common/reader_utils.h"
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/io/read/common/sniffer.h"
-#include "parquet/arrow_reader.h"
-#include "parquet/arrow_sniffer.h"
+#include "parquet/parquet_reader.h"
+#include "parquet/parquet_sniffer.h"
 #include "parquet_options.h"
 
 namespace neug {
@@ -62,7 +62,7 @@ struct ParquetReadFunction {
     const size_t fallback_column_count = state->columnNum();
 
     std::unique_ptr<reader::FileReader> reader =
-        std::make_unique<reader::ArrowReader>(
+        std::make_unique<reader::ParquetReader>(
             state, std::move(optionsBuilder), std::move(fs));
     return reader::runFileReader(std::move(reader), *state,
                                  fallback_column_count);
@@ -91,10 +91,10 @@ struct ParquetReadFunction {
     auto optionsBuilder =
         std::make_unique<reader::ParquetOptionsBuilder>(state);
 
-    auto reader = std::make_shared<reader::ArrowReader>(
+    auto reader = std::make_shared<reader::ParquetReader>(
         state, std::move(optionsBuilder), std::move(fs));
 
-    auto sniffer = std::make_shared<reader::ArrowSniffer>(reader);
+    auto sniffer = std::make_shared<reader::ParquetSniffer>(reader);
     auto sniffResult = sniffer->sniff();
 
     if (!sniffResult) {

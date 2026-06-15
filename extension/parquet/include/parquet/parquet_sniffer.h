@@ -12,21 +12,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#pragma once
 
-#include "parquet/arrow_sniffer.h"
+#include <memory>
 
-#include "neug/utils/result.h"
+#include "neug/utils/io/read/common/sniffer.h"
+#include "parquet/parquet_reader.h"
 
 namespace neug {
 namespace reader {
 
-result<std::shared_ptr<EntrySchema>> ArrowSniffer::sniff() {
-  if (!reader_) {
-    RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
-                        "ArrowReader is null");
-  }
-  return reader_->inferSchema();
-}
+class ParquetSniffer : public Sniffer {
+ public:
+  explicit ParquetSniffer(std::shared_ptr<ParquetReader> reader)
+      : reader_(std::move(reader)) {}
+
+  result<std::shared_ptr<EntrySchema>> sniff() override;
+
+ private:
+  std::shared_ptr<ParquetReader> reader_;
+};
+
+using ArrowSniffer = ParquetSniffer;
 
 }  // namespace reader
 }  // namespace neug

@@ -69,13 +69,7 @@ DataType arrow_type_to_rt_type(const std::shared_ptr<arrow::DataType>& type) {
     return DataType(DataTypeId::kDate);
   } else if (type->Equals(arrow::date64())) {
     return DataType(DataTypeId::kDate);
-  } else if (type->Equals(arrow::timestamp(arrow::TimeUnit::SECOND))) {
-    return DataType(DataTypeId::kTimestampMs);
-  } else if (type->Equals(arrow::timestamp(arrow::TimeUnit::MILLI))) {
-    return DataType(DataTypeId::kTimestampMs);
-  } else if (type->Equals(arrow::timestamp(arrow::TimeUnit::MICRO))) {
-    return DataType(DataTypeId::kTimestampMs);
-  } else if (type->Equals(arrow::timestamp(arrow::TimeUnit::NANO))) {
+  } else if (type->id() == arrow::Type::TIMESTAMP) {
     return DataType(DataTypeId::kTimestampMs);
   } else {
     THROW_NOT_SUPPORTED_EXCEPTION("Unexpected arrow type: " + type->ToString());

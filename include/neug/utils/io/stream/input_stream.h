@@ -33,6 +33,16 @@ class RandomAccessFile {
   virtual int64_t Size() = 0;
   virtual neug::Status Seek(int64_t position) = 0;
   virtual neug::Status Read(int64_t nbytes, void* out, int64_t* bytes_read) = 0;
+  /// Random read at an absolute offset. Default uses Seek+Read; implementations
+  /// that may be accessed concurrently should override with a single lock.
+  virtual neug::Status ReadAt(int64_t position, int64_t nbytes, void* out,
+                              int64_t* bytes_read) {
+    auto status = Seek(position);
+    if (!status.ok()) {
+      return status;
+    }
+    return Read(nbytes, out, bytes_read);
+  }
   virtual neug::Status Close() = 0;
   virtual bool Closed() const = 0;
 };
