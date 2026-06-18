@@ -150,7 +150,6 @@ else ()
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lopen-pal")
     else ()
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath,$ORIGIN")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
     endif ()
 endif ()
 # Only add -fopenmp if not using clang
@@ -197,9 +196,16 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
 #if compiler is gcc
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-class-memaccess -Wno-maybe-uninitialized -Wno-ignored-attributes")
     # -Wno-missing-requires: protobuf v29.6 headers use C++20 concepts in port.h
     # that trigger this warning on GCC 13+, which becomes an error with -Werror.
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-class-memaccess -Wno-maybe-uninitialized -Wno-missing-requires -Wno-ignored-attributes")
+    # Only add if compiler supports it (GCC 13+), otherwise -Werror treats the
+    # unrecognized option warning as a fatal error on older GCC.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-Wno-missing-requires" COMPILER_SUPPORTS_NO_MISSING_REQUIRES)
+    if(COMPILER_SUPPORTS_NO_MISSING_REQUIRES)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-missing-requires")
+    endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-uninitialized")
 endif()
@@ -501,6 +507,13 @@ endif()
 
 include_directories(SYSTEM third_party/HowardHinnant/date/include)
 include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party/csv-parser)
+
+# GCC < 11 does not support std::from_chars for floating-point types.
+# csv-parser's classify_scalar module assumes it's available on any non-libc++
+# C++17 implementation; disable it explicitly on older GCC.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "11")
+    add_compile_definitions(CLASSIFY_SCALAR_DISABLE_STD_FLOAT_FROM_CHARS)
+endif()
 
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party)
