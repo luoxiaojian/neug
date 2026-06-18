@@ -1,11 +1,10 @@
-/**
- * Copyright 2020 Alibaba Group Holding Limited.
+/** Copyright 2020 Alibaba Group Holding Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * 	http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,19 +12,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #pragma once
 
-#include "neug/compiler/function/export/export_function.h"
+#include "parquet/parquet_encoder.h"
 
 namespace neug {
-namespace function {
+namespace reader {
 
-struct ExportParquetFunction : public ExportFunction {
-  static constexpr const char* name = "COPY_PARQUET";
-
-  static function_set getFunctionSet();
+class ArrowParquetEncoder : public IParquetEncoder {
+ public:
+  neug::Status writeTable(
+      fsys::FileSystem& fs, const std::string& path,
+      const QueryResponse* table,
+      const std::shared_ptr<EntrySchema>& entry_schema,
+      const ParquetWriteOptions& options) override;
 };
 
-}  // namespace function
+}  // namespace reader
 }  // namespace neug

@@ -482,6 +482,22 @@ pybind11::object fetch_value_from_column(const neug::Array& column,
     const auto& col = column.list_array();
     const auto& validity_map = col.validity();
     if (is_valid(validity_map, index)) {
+      if (col.has_elements() && col.elements().has_struct_array()) {
+        const auto& elem_struct = col.elements().struct_array();
+        if (elem_struct.fields_size() == 2) {
+          pybind11::dict map_dict;
+          const uint32_t list_size = col.offsets(index + 1) - col.offsets(index);
+          const size_t offset = col.offsets(index);
+          for (uint32_t i = 0; i < list_size; ++i) {
+            pybind11::object key =
+                fetch_value_from_column(elem_struct.fields(0), offset + i);
+            pybind11::object value =
+                fetch_value_from_column(elem_struct.fields(1), offset + i);
+            map_dict[std::move(key)] = std::move(value);
+          }
+          return map_dict;
+        }
+      }
       pybind11::list list;
       uint32_t list_size = col.offsets(index + 1) - col.offsets(index);
       size_t offset = col.offsets(index);

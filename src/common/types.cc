@@ -152,6 +152,17 @@ DataType parse_from_data_type(const ::common::DataType& ddt) {
     return DataType(DataTypeId::kList,
                     std::make_shared<ListTypeInfo>(data_type));
   }
+  case ::common::DataType::kMap: {
+    const auto& map = ddt.map();
+    const auto key_type = parse_from_data_type(map.key_type());
+    const auto value_type = parse_from_data_type(map.value_type());
+    const auto struct_type = DataType(
+        DataTypeId::kStruct,
+        std::make_shared<StructTypeInfo>(
+            std::vector<DataType>{key_type, value_type}));
+    return DataType(DataTypeId::kList,
+                    std::make_shared<ListTypeInfo>(struct_type));
+  }
   case ::common::DataType::kTuple: {
     const auto& component_types = ddt.tuple().component_types();
     std::vector<DataType> data_types;

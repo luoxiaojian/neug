@@ -43,6 +43,9 @@ class GPhysicalTypeConverter {
 
   std::unique_ptr<::common::IrDataType> convertArrayType(
       const common::LogicalType& type);
+  std::unique_ptr<::common::IrDataType> convertMapType(
+      const common::LogicalType& keyType,
+      const common::LogicalType& valueType);
   std::unique_ptr<::common::IrDataType> convertStructType(
       const common::LogicalType& type);
 

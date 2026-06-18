@@ -1,11 +1,10 @@
-/**
- * Copyright 2020 Alibaba Group Holding Limited.
+/** Copyright 2020 Alibaba Group Holding Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * 	http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,19 +12,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #pragma once
 
-#include "neug/compiler/function/export/export_function.h"
+#include <carquet/carquet.h>
+
+#include <string>
+#include <vector>
+
+#include "neug/generated/proto/response/response.pb.h"
+#include "neug/utils/result.h"
+#include "parquet/carquet_export_type_converter.h"
 
 namespace neug {
-namespace function {
+namespace reader {
 
-struct ExportParquetFunction : public ExportFunction {
-  static constexpr const char* name = "COPY_PARQUET";
+neug::Status writeCarquetColumn(
+    carquet_writer_t* writer, const carquet_schema_t* schema,
+    const CarquetExportColumn& column, const Array& proto_array,
+    int64_t num_rows);
 
-  static function_set getFunctionSet();
-};
-
-}  // namespace function
+}  // namespace reader
 }  // namespace neug

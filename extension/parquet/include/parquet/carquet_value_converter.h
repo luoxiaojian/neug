@@ -22,6 +22,7 @@
 
 #include "neug/execution/common/data_chunk.h"
 #include "neug/utils/io/vfs/file_system.h"
+#include "parquet/carquet_type_converter.h"
 #include "parquet/parquet_options.h"
 
 namespace neug {
@@ -43,6 +44,19 @@ std::shared_ptr<execution::IContextColumn> carquetBatchColumnToValueColumn(
     const carquet_row_batch_t* batch, int32_t batch_column_index,
     carquet_physical_type_t physical,
     const carquet_logical_type_t* logical);
+
+std::shared_ptr<execution::IContextColumn> readCarquetFlatColumn(
+    carquet_reader_t* reader, int32_t leaf_index,
+    carquet_physical_type_t physical, const carquet_logical_type_t* logical);
+
+std::shared_ptr<execution::IContextColumn> readCarquetListColumn(
+    carquet_reader_t* reader, int32_t leaf_index,
+    carquet_physical_type_t physical, const carquet_logical_type_t* logical,
+    int16_t max_rep_level, int16_t max_def_level);
+
+execution::DataChunk readCarquetProjectedColumns(
+    carquet_reader_t* reader,
+    const std::vector<CarquetProjectedColumn>& projected);
 
 execution::DataChunk carquetBatchToDataChunk(
     const carquet_row_batch_t* batch,

@@ -18,11 +18,15 @@
 
 #include <glog/logging.h>
 
+#include <algorithm>
+
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/io/read/common/options.h"
 #include "neug/utils/io/read/common/read_state.h"
 
 #if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
+#include <arrow/util/compression.h>
+#include <parquet/properties.h>
 #include <arrow/io/caching.h>
 #include <parquet/arrow/reader.h>
 #endif
@@ -72,6 +76,47 @@ ParquetReadOptions ParquetOptionsBuilder::build() const {
 #endif
 
   return options;
+}
+
+ParquetWriteOptions ParquetExportOptionsBuilder::build() const {
+  ParquetExportOptions export_options;
+  ParquetWriteOptions write_options;
+  write_options.compression = export_options.compression.get(options_);
+  write_options.row_group_size = export_options.row_group_size.get(options_);
+  write_options.dictionary_encoding =
+      export_options.dictionary_encoding.get(options_);
+
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
+  std::string codec = write_options.compression;
+  std::transform(codec.begin(), codec.end(), codec.begin(), ::tolower);
+
+  arrow::Compression::type compression;
+  if (codec == "none" || codec == "uncompressed") {
+    compression = arrow::Compression::UNCOMPRESSED;
+  } else if (codec == "snappy") {
+    compression = arrow::Compression::SNAPPY;
+  } else if (codec == "zlib" || codec == "gzip") {
+    compression = arrow::Compression::GZIP;
+  } else if (codec == "zstd" || codec == "zstandard") {
+    compression = arrow::Compression::ZSTD;
+  } else {
+    THROW_INVALID_ARGUMENT_EXCEPTION(
+        "Unsupported compression codec: " + codec +
+        ". Supported: none, snappy, gzip (zlib), zstd");
+  }
+
+  ::parquet::WriterProperties::Builder builder;
+  builder.compression(compression);
+  builder.max_row_group_length(write_options.row_group_size);
+  if (write_options.dictionary_encoding) {
+    builder.enable_dictionary();
+  } else {
+    builder.disable_dictionary();
+  }
+  write_options.writer_properties = builder.build();
+#endif
+
+  return write_options;
 }
 
 }  // namespace reader

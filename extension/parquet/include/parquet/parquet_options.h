@@ -70,5 +70,26 @@ class ParquetOptionsBuilder {
   std::shared_ptr<ReadSharedState> state_;
 };
 
+/// Parquet writer configuration shared by Arrow and Carquet backends.
+struct ParquetWriteOptions {
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
+  std::shared_ptr<::parquet::WriterProperties> writer_properties;
+#endif
+  std::string compression = "snappy";
+  int64_t row_group_size = 1048576;
+  bool dictionary_encoding = true;
+};
+
+class ParquetExportOptionsBuilder {
+ public:
+  explicit ParquetExportOptionsBuilder(const options_t& options)
+      : options_(options) {}
+
+  ParquetWriteOptions build() const;
+
+ private:
+  options_t options_;
+};
+
 }  // namespace reader
 }  // namespace neug

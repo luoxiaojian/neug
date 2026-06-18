@@ -103,10 +103,64 @@ Arrow 模式下 `libparquet` 以 object library 形式链入 extension，通常�
 | 能力 | Carquet (`OFF`) | Arrow (`ON`) |
 |------|-----------------|--------------|
 | Parquet **读取** | ✅ | ✅ |
-| Parquet **导出**（`COPY_PARQUET` 等） | ❌ | ✅ |
+| Parquet **导出**（`COPY_PARQUET` 等） | ✅ | ✅ |
+| 嵌套 schema 推断（LIST/MAP） | ✅（Carquet decoder） | ✅ |
+| 嵌套 batch **读取** | 部分（flat 列完整） | ✅ |
 | 运行时依赖 Thrift / Boost | ❌ | 编译期依赖 Thrift；Boost 多为 headers |
 | 默认 `PARQUET_BACKEND` | `native` | `arrow` |
 | 可选运行时切换后端 | 无 Arrow 编译时强制 Native | 支持 `arrow` / `native` / `auto` |
+
+## 类型支持矩阵（Carquet 后端，按优先级）
+
+**P0 — 常见类型（读写 + 导出 + sniffer + 测试必须覆盖）**
+
+| 类型 | 读 | 导出 | 导出→读 roundtrip | 说明 |
+|------|:--:|:----:|:-----------------:|------|
+| INT32 / INT64 | ✅ | ✅ | ✅ | |
+| UINT32 / UINT64 | ✅ | ✅ | ✅ | Parquet `INTEGER` logical type |
+| FLOAT / DOUBLE | ✅ | ✅ | ✅ | |
+| STRING | ✅ | ✅ | ✅ | |
+| BOOLEAN | ✅ | ✅ | ✅ | |
+| DATE | ✅ | ✅ | ✅ | Parquet `DATE`（days）↔ NeuG `Date` |
+| TIMESTAMP | ✅ | ✅ | ✅ | 默认 micros；读路径统一为 millis |
+| LIST（标量元素） | ✅ | ✅ | ✅ | 如 `list_col`、string/int 列表 |
+| MAP（string→string 等 flat KV） | ✅ | schema ✅ | ✅ | 读为 LIST<STRUCT{K,V}>，Python 侧转 dict |
+| INTERVAL | ✅ | ✅ | ✅ | 导出为 STRING（无原生 Parquet interval） |
+
+**P1 — 有用但非阻塞**
+
+| 类型 | 读 | 导出 | 说明 |
+|------|:--:|:----:|------|
+| MAP | schema ✅ / 读 ✅（flat KV） | schema ✅ | sniffer + `test_parquet_type_inference_map` |
+| STRUCT / TUPLE | schema ✅ / 读 ❌ | ✅（JSON 字符串或嵌套 group） | Vertex/Edge 导出为 JSON 字符串 |
+| 压缩选项（snappy/gzip/zstd） | ✅ | ✅ | Carquet 与 Arrow 编码策略不同 |
+| row_group_size / dictionary | — | ✅ | 选项透传；体积断言仅 Arrow 模式 |
+
+**P2 — 边缘能力（可不做）**
+
+| 类型 | Carquet | 说明 |
+|------|---------|------|
+| INT96 TIMESTAMP | 可选 | Impala 遗留格式；新文件极少见 |
+| DECIMAL / UUID / Geo | ❌ | 按需再加 |
+| 嵌套 batch 投影读 | 部分 | 含 nested 列时回退全文件读 |
+
+Python E2E 参考：`test_export_comprehensive_graph_to_parquet`（11 列 scalar roundtrip）、`test_parquet_type_inference_list`。
+
+## C++ 测试覆盖（`parquet_extension_test`）
+
+| 模式 | 测试数 | 说明 |
+|------|--------|------|
+| Carquet (`OFF`) | **29** | 读路径 12 + 导出 16 + schema 校验 1 |
+| Arrow (`ON`) | **35** | 上述 29 + Arrow 选项翻译 8（需 `PARQUET_USE_ARROW=ON` 重配 build） |
+
+本地跑 Parquet export Python 测试（与 CI 一致，使用 `bulk_loader` + 本地 `example_dataset`）：
+
+```bash
+chmod +x scripts/run_parquet_export_tests.sh
+./scripts/run_parquet_export_tests.sh
+```
+
+导出相关测试在两种后端共用 `ParquetExportWriter` + `IParquetEncoder`；字典压缩体积断言仅在 Arrow 模式下检查（Carquet 编码策略不同）。
 
 ## Arrow 依赖说明（简要）
 
@@ -114,7 +168,7 @@ Arrow 模式下 `libparquet` 以 object library 形式链入 extension，通常�
 - **Boost**：Parquet-only 精简构建通常只需 **Boost headers**（不编完整 Boost 库），但 bundled 构建仍会下载 Boost 源码包。
 - **`PARQUET_MINIMAL_DEPENDENCY`**：历史 CMake 选项，已在 Arrow 上游废弃，不能作为「无 Thrift 读 Parquet」的方案。
 
-若目标是轻量化 **只读** Parquet，优先使用 Carquet；需要 **Export** 或 Arrow 生态能力时再启用 Arrow。
+若目标是轻量化 Parquet，优先使用 Carquet；需要 Arrow 生态（S3/httpfs 与 Arrow FS 深度集成等）时再启用 Arrow。
 
 ## 构建产物位置
 
@@ -162,4 +216,4 @@ rm -rf bench-build-carquet bench-build-arrow
 | 部署体积（neug + ext） | ~27 MB | ~41 MB |
 | build 树磁盘 | ~387 MB | ~710 MB |
 
-**推荐**：默认 `PARQUET_USE_ARROW=OFF`（Carquet）；仅在需要 Parquet Export 或 Arrow 后端特性时设为 `ON`。
+**推荐**：默认 `PARQUET_USE_ARROW=OFF`（Carquet）；需要 Arrow FS/S3 集成或 Arrow 专属优化时再设为 `ON`。

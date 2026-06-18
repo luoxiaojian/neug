@@ -383,7 +383,6 @@ class TestLoadSniffer:
         assert isinstance(row[2], object)
 
     @extension_test
-    @pytest.mark.xfail(reason="TODO: support Parquet list arrow type in LOAD FROM.")
     def test_parquet_type_inference_list(self):
         self.conn.execute("LOAD PARQUET")
         parquet_path = self._get_comprehensive_parquet_path("parquet_list.parquet")
@@ -400,7 +399,6 @@ class TestLoadSniffer:
         assert rows[0][0] == [1, 2, 3]
 
     @extension_test
-    @pytest.mark.xfail(reason="TODO: support Parquet map type inference in LOAD FROM.")
     def test_parquet_type_inference_map(self):
         self.conn.execute("LOAD PARQUET")
         parquet_path = self._get_comprehensive_parquet_path("parquet_map.parquet")
