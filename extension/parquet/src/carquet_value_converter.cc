@@ -15,6 +15,7 @@
 
 #include "parquet/carquet_value_converter.h"
 
+#include <algorithm>
 #include <climits>
 #include <cstring>
 
@@ -26,6 +27,7 @@
 #include "neug/execution/common/types/value.h"
 #include "neug/common/types.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/io/file/file_utils.h"
 #include "parquet/carquet_type_converter.h"
 
 namespace neug {
@@ -35,24 +37,6 @@ namespace {
 using execution::date_t;
 using execution::timestamp_ms_t;
 using execution::Value;
-
-constexpr const char* kFilePrefix = "file://";
-
-std::string normalizeLocalPath(const std::string& path) {
-  if (path.rfind(kFilePrefix, 0) == 0) {
-    std::string local_path = path.substr(std::strlen(kFilePrefix));
-    if (local_path.empty() || local_path[0] != '/') {
-      local_path = "/" + local_path;
-    }
-    return local_path;
-  }
-  return path;
-}
-
-bool isLocalPath(const std::string& path) {
-  const auto pos = path.find("://");
-  return pos == std::string::npos || path.rfind(kFilePrefix, 0) == 0;
-}
 
 void throwCarquetError(const carquet_error_t& err, const std::string& ctx) {
   char buf[512];
@@ -141,17 +125,6 @@ std::shared_ptr<execution::IContextColumn> buildTimestampFromInt64(
   return builder.finish();
 }
 
-int64_t int96ToMillis(const carquet_int96_t& value) {
-  constexpr int64_t kJulianEpochOffsetDays = 2440588LL;
-  constexpr int64_t kNanosPerMillis = 1000000LL;
-  constexpr int64_t kMillisPerDay = 86400000LL;
-  int64_t nanos_since_midnight = 0;
-  std::memcpy(&nanos_since_midnight, value.value, sizeof(int64_t));
-  const int64_t days =
-      static_cast<int64_t>(value.value[2]) - kJulianEpochOffsetDays;
-  return days * kMillisPerDay + nanos_since_midnight / kNanosPerMillis;
-}
-
 std::shared_ptr<execution::IContextColumn> buildInt96TimestampColumn(
     const carquet_int96_t* data, const uint8_t* null_bitmap, int64_t num_values) {
   execution::ValueColumnBuilder<timestamp_ms_t> builder(null_bitmap != nullptr);
@@ -174,6 +147,36 @@ DataType listElementDataType(carquet_physical_type_t physical,
 }
 
 }  // namespace
+
+int64_t int96ToMillis(const carquet_int96_t& value) {
+  constexpr int64_t kJulianEpochOffsetDays = 2440588LL;
+  constexpr int64_t kNanosPerMillis = 1000000LL;
+  constexpr int64_t kMillisPerDay = 86400000LL;
+  constexpr int64_t kNanosPerDay = 86400000000000LL;
+  constexpr int64_t kMaxDays = INT64_MAX / kMillisPerDay;
+
+  int64_t nanos_since_midnight = 0;
+  std::memcpy(&nanos_since_midnight, value.value, sizeof(int64_t));
+
+  // Clamp nanos_since_midnight to valid range [0, kNanosPerDay).
+  if (nanos_since_midnight < 0) {
+    nanos_since_midnight = 0;
+  } else if (nanos_since_midnight >= kNanosPerDay) {
+    nanos_since_midnight = kNanosPerDay - 1;
+  }
+
+  const int64_t days =
+      static_cast<int64_t>(value.value[2]) - kJulianEpochOffsetDays;
+
+  // Overflow guard: clamp to representable range.
+  if (days > kMaxDays) {
+    return INT64_MAX;
+  }
+  if (days < -kMaxDays) {
+    return INT64_MIN;
+  }
+  return days * kMillisPerDay + nanos_since_midnight / kNanosPerMillis;
+}
 
 CarquetReaderHandle openCarquetReader(fsys::FileSystem& fs,
                                       const std::string& path,
@@ -219,12 +222,29 @@ CarquetReaderHandle openCarquetReader(fsys::FileSystem& fs,
   return handle;
 }
 
-void closeCarquetReader(CarquetReaderHandle& handle) {
-  if (handle.reader != nullptr) {
-    carquet_reader_close(handle.reader);
-    handle.reader = nullptr;
+CarquetReaderHandle::CarquetReaderHandle(CarquetReaderHandle&& other) noexcept
+    : reader(other.reader), owned_buffer(std::move(other.owned_buffer)) {
+  other.reader = nullptr;
+}
+
+CarquetReaderHandle& CarquetReaderHandle::operator=(
+    CarquetReaderHandle&& other) noexcept {
+  if (this != &other) {
+    close();
+    reader = other.reader;
+    owned_buffer = std::move(other.owned_buffer);
+    other.reader = nullptr;
   }
-  handle.owned_buffer.clear();
+  return *this;
+}
+
+void CarquetReaderHandle::close() {
+  if (reader != nullptr) {
+    carquet_reader_close(reader);
+    reader = nullptr;
+  }
+  owned_buffer.clear();
+  owned_buffer.shrink_to_fit();
 }
 
 std::shared_ptr<execution::IContextColumn> carquetBatchColumnToValueColumn(
@@ -406,6 +426,98 @@ void appendFlatValuesFromColumnReader(
   (void)value_size;
 }
 
+// --- Specialized append functions for non-trivially-typed columns ---
+
+void appendBooleanValuesFromColumnReader(
+    carquet_column_reader_t* col_reader,
+    execution::ValueColumnBuilder<bool>& builder, int16_t max_def) {
+  std::vector<uint8_t> values(4096);
+  std::vector<int16_t> def_levels(4096);
+  while (true) {
+    const int64_t count = carquet_column_read_batch(
+        col_reader, values.data(), static_cast<int64_t>(values.size()),
+        max_def > 0 ? def_levels.data() : nullptr, nullptr);
+    if (count <= 0) {
+      break;
+    }
+    for (int64_t i = 0; i < count; ++i) {
+      if (max_def > 0 && def_levels[static_cast<size_t>(i)] != max_def) {
+        builder.push_back_null();
+      } else {
+        builder.push_back_opt(values[static_cast<size_t>(i)] != 0);
+      }
+    }
+  }
+}
+
+void appendByteArrayValuesFromColumnReader(
+    carquet_column_reader_t* col_reader,
+    execution::ValueColumnBuilder<std::string>& builder, int16_t max_def) {
+  std::vector<carquet_byte_array_t> values(4096);
+  std::vector<int16_t> def_levels(4096);
+  while (true) {
+    const int64_t count = carquet_column_read_batch(
+        col_reader, values.data(), static_cast<int64_t>(values.size()),
+        max_def > 0 ? def_levels.data() : nullptr, nullptr);
+    if (count <= 0) {
+      break;
+    }
+    for (int64_t i = 0; i < count; ++i) {
+      if (max_def > 0 && def_levels[static_cast<size_t>(i)] != max_def) {
+        builder.push_back_null();
+      } else {
+        builder.push_back_opt(std::string(
+            reinterpret_cast<const char*>(values[static_cast<size_t>(i)].data),
+            static_cast<size_t>(values[static_cast<size_t>(i)].length)));
+      }
+    }
+  }
+}
+
+void appendInt96TimestampValuesFromColumnReader(
+    carquet_column_reader_t* col_reader,
+    execution::ValueColumnBuilder<timestamp_ms_t>& builder, int16_t max_def) {
+  std::vector<carquet_int96_t> values(4096);
+  std::vector<int16_t> def_levels(4096);
+  while (true) {
+    const int64_t count = carquet_column_read_batch(
+        col_reader, values.data(), static_cast<int64_t>(values.size()),
+        max_def > 0 ? def_levels.data() : nullptr, nullptr);
+    if (count <= 0) {
+      break;
+    }
+    for (int64_t i = 0; i < count; ++i) {
+      if (max_def > 0 && def_levels[static_cast<size_t>(i)] != max_def) {
+        builder.push_back_null();
+      } else {
+        builder.push_back_opt(
+            timestamp_ms_t(int96ToMillis(values[static_cast<size_t>(i)])));
+      }
+    }
+  }
+}
+
+/// Reads a flat column across all row groups using a generic append function.
+/// Eliminates repeated row-group iteration + column-reader lifecycle boilerplate.
+template <typename BuilderT, typename AppendFn>
+std::shared_ptr<execution::IContextColumn> readFlatColumnAllRowGroups(
+    carquet_reader_t* reader, int32_t leaf_index, int16_t max_def,
+    AppendFn append_fn) {
+  BuilderT builder(max_def > 0);
+  carquet_error_t err = CARQUET_ERROR_INIT;
+  const int32_t num_row_groups = carquet_reader_num_row_groups(reader);
+  for (int32_t rg = 0; rg < num_row_groups; ++rg) {
+    carquet_column_reader_t* col =
+        carquet_reader_get_column(reader, rg, leaf_index, &err);
+    if (col == nullptr) {
+      throwCarquetError(err, "Failed to open Carquet column reader");
+    }
+    append_fn(col, builder, max_def);
+    carquet_column_reader_free(col);
+  }
+  return builder.finish();
+}
+
 void appendListRowsFromBatch(
     execution::ListColumnBuilder& list_builder,
     carquet_physical_type_t physical, const carquet_logical_type_t* logical,
@@ -477,218 +589,91 @@ std::shared_ptr<execution::IContextColumn> readCarquetFlatColumn(
     carquet_physical_type_t physical, const carquet_logical_type_t* logical) {
   const int16_t max_def = carquet_schema_max_def_level(
       carquet_reader_schema(reader), leaf_index);
-  carquet_error_t err = CARQUET_ERROR_INIT;
-  const int32_t num_row_groups = carquet_reader_num_row_groups(reader);
 
   switch (physical) {
-  case CARQUET_PHYSICAL_BOOLEAN: {
-    execution::ValueColumnBuilder<bool> builder(max_def > 0);
-    for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-      carquet_column_reader_t* col =
-          carquet_reader_get_column(reader, rg, leaf_index, &err);
-      if (col == nullptr) {
-        throwCarquetError(err, "Failed to open Carquet column reader");
-      }
-      std::vector<uint8_t> values(4096);
-      std::vector<int16_t> def_levels(4096);
-      while (true) {
-        const int64_t count = carquet_column_read_batch(
-            col, values.data(), static_cast<int64_t>(values.size()),
-            max_def > 0 ? def_levels.data() : nullptr, nullptr);
-        if (count <= 0) {
-          break;
-        }
-        for (int64_t i = 0; i < count; ++i) {
-          if (max_def > 0 && def_levels[static_cast<size_t>(i)] != max_def) {
-            builder.push_back_null();
-          } else {
-            builder.push_back_opt(values[static_cast<size_t>(i)] != 0);
-          }
-        }
-      }
-      carquet_column_reader_free(col);
-    }
-    return builder.finish();
-  }
+  case CARQUET_PHYSICAL_BOOLEAN:
+    return readFlatColumnAllRowGroups<execution::ValueColumnBuilder<bool>>(
+        reader, leaf_index, max_def, appendBooleanValuesFromColumnReader);
+
   case CARQUET_PHYSICAL_INT32: {
     if (logical != nullptr && logical->id == CARQUET_LOGICAL_DATE) {
-      execution::ValueColumnBuilder<date_t> builder(max_def > 0);
-      for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-        carquet_column_reader_t* col =
-            carquet_reader_get_column(reader, rg, leaf_index, &err);
-        if (col == nullptr) {
-          throwCarquetError(err, "Failed to open Carquet column reader");
-        }
-        appendFlatConvertedValuesFromColumnReader<date_t, int32_t>(
-            col, builder, max_def,
-            [](int32_t days) { return date_t(days); });
-        carquet_column_reader_free(col);
-      }
-      return builder.finish();
+      return readFlatColumnAllRowGroups<execution::ValueColumnBuilder<date_t>>(
+          reader, leaf_index, max_def,
+          [](carquet_column_reader_t* col, auto& builder, int16_t md) {
+            appendFlatConvertedValuesFromColumnReader<date_t, int32_t>(
+                col, builder, md, [](int32_t days) { return date_t(days); });
+          });
     }
     if (logical != nullptr && logical->id == CARQUET_LOGICAL_INTEGER &&
         !logical->params.integer.is_signed) {
-      execution::ValueColumnBuilder<uint32_t> builder(max_def > 0);
-      for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-        carquet_column_reader_t* col =
-            carquet_reader_get_column(reader, rg, leaf_index, &err);
-        if (col == nullptr) {
-          throwCarquetError(err, "Failed to open Carquet column reader");
-        }
-        appendFlatConvertedValuesFromColumnReader<uint32_t, int32_t>(
-            col, builder, max_def, [](int32_t value) {
-              return static_cast<uint32_t>(value);
-            });
-        carquet_column_reader_free(col);
-      }
-      return builder.finish();
+      return readFlatColumnAllRowGroups<execution::ValueColumnBuilder<uint32_t>>(
+          reader, leaf_index, max_def,
+          [](carquet_column_reader_t* col, auto& builder, int16_t md) {
+            appendFlatConvertedValuesFromColumnReader<uint32_t, int32_t>(
+                col, builder, md,
+                [](int32_t v) { return static_cast<uint32_t>(v); });
+          });
     }
-    execution::ValueColumnBuilder<int32_t> builder(max_def > 0);
-    for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-      carquet_column_reader_t* col =
-          carquet_reader_get_column(reader, rg, leaf_index, &err);
-      if (col == nullptr) {
-        throwCarquetError(err, "Failed to open Carquet column reader");
-      }
-      appendFlatValuesFromColumnReader(col, builder, max_def, sizeof(int32_t));
-      carquet_column_reader_free(col);
-    }
-    return builder.finish();
+    return readFlatColumnAllRowGroups<execution::ValueColumnBuilder<int32_t>>(
+        reader, leaf_index, max_def,
+        [](carquet_column_reader_t* col, auto& builder, int16_t md) {
+          appendFlatValuesFromColumnReader(col, builder, md, sizeof(int32_t));
+        });
   }
   case CARQUET_PHYSICAL_INT64: {
     if (logical != nullptr && logical->id == CARQUET_LOGICAL_TIMESTAMP) {
       const carquet_time_unit_t unit = logical->params.timestamp.unit;
-      execution::ValueColumnBuilder<timestamp_ms_t> builder(max_def > 0);
-      for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-        carquet_column_reader_t* col =
-            carquet_reader_get_column(reader, rg, leaf_index, &err);
-        if (col == nullptr) {
-          throwCarquetError(err, "Failed to open Carquet column reader");
-        }
-        appendFlatConvertedValuesFromColumnReader<timestamp_ms_t, int64_t>(
-            col, builder, max_def, [unit](int64_t value) {
-              return timestamp_ms_t(carquetTimestampToMillis(value, unit));
-            });
-        carquet_column_reader_free(col);
-      }
-      return builder.finish();
+      return readFlatColumnAllRowGroups<
+          execution::ValueColumnBuilder<timestamp_ms_t>>(
+          reader, leaf_index, max_def,
+          [unit](carquet_column_reader_t* col, auto& builder, int16_t md) {
+            appendFlatConvertedValuesFromColumnReader<timestamp_ms_t, int64_t>(
+                col, builder, md, [unit](int64_t v) {
+                  return timestamp_ms_t(carquetTimestampToMillis(v, unit));
+                });
+          });
     }
     if (logical != nullptr && logical->id == CARQUET_LOGICAL_INTEGER &&
         !logical->params.integer.is_signed) {
-      execution::ValueColumnBuilder<uint64_t> builder(max_def > 0);
-      for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-        carquet_column_reader_t* col =
-            carquet_reader_get_column(reader, rg, leaf_index, &err);
-        if (col == nullptr) {
-          throwCarquetError(err, "Failed to open Carquet column reader");
-        }
-        appendFlatConvertedValuesFromColumnReader<uint64_t, int64_t>(
-            col, builder, max_def, [](int64_t value) {
-              return static_cast<uint64_t>(value);
-            });
-        carquet_column_reader_free(col);
-      }
-      return builder.finish();
+      return readFlatColumnAllRowGroups<execution::ValueColumnBuilder<uint64_t>>(
+          reader, leaf_index, max_def,
+          [](carquet_column_reader_t* col, auto& builder, int16_t md) {
+            appendFlatConvertedValuesFromColumnReader<uint64_t, int64_t>(
+                col, builder, md,
+                [](int64_t v) { return static_cast<uint64_t>(v); });
+          });
     }
-    execution::ValueColumnBuilder<int64_t> builder(max_def > 0);
-    for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-      carquet_column_reader_t* col =
-          carquet_reader_get_column(reader, rg, leaf_index, &err);
-      if (col == nullptr) {
-        throwCarquetError(err, "Failed to open Carquet column reader");
-      }
-      appendFlatValuesFromColumnReader(col, builder, max_def, sizeof(int64_t));
-      carquet_column_reader_free(col);
-    }
-    return builder.finish();
+    return readFlatColumnAllRowGroups<execution::ValueColumnBuilder<int64_t>>(
+        reader, leaf_index, max_def,
+        [](carquet_column_reader_t* col, auto& builder, int16_t md) {
+          appendFlatValuesFromColumnReader(col, builder, md, sizeof(int64_t));
+        });
   }
-  case CARQUET_PHYSICAL_FLOAT: {
-    execution::ValueColumnBuilder<float> builder(max_def > 0);
-    for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-      carquet_column_reader_t* col =
-          carquet_reader_get_column(reader, rg, leaf_index, &err);
-      if (col == nullptr) {
-        throwCarquetError(err, "Failed to open Carquet column reader");
-      }
-      appendFlatValuesFromColumnReader(col, builder, max_def, sizeof(float));
-      carquet_column_reader_free(col);
-    }
-    return builder.finish();
-  }
-  case CARQUET_PHYSICAL_DOUBLE: {
-    execution::ValueColumnBuilder<double> builder(max_def > 0);
-    for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-      carquet_column_reader_t* col =
-          carquet_reader_get_column(reader, rg, leaf_index, &err);
-      if (col == nullptr) {
-        throwCarquetError(err, "Failed to open Carquet column reader");
-      }
-      appendFlatValuesFromColumnReader(col, builder, max_def, sizeof(double));
-      carquet_column_reader_free(col);
-    }
-    return builder.finish();
-  }
-  case CARQUET_PHYSICAL_BYTE_ARRAY: {
-    execution::ValueColumnBuilder<std::string> builder(max_def > 0);
-    for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-      carquet_column_reader_t* col =
-          carquet_reader_get_column(reader, rg, leaf_index, &err);
-      if (col == nullptr) {
-        throwCarquetError(err, "Failed to open Carquet column reader");
-      }
-      std::vector<carquet_byte_array_t> values(4096);
-      std::vector<int16_t> def_levels(4096);
-      while (true) {
-        const int64_t count = carquet_column_read_batch(
-            col, values.data(), static_cast<int64_t>(values.size()),
-            max_def > 0 ? def_levels.data() : nullptr, nullptr);
-        if (count <= 0) {
-          break;
-        }
-        for (int64_t i = 0; i < count; ++i) {
-          if (max_def > 0 && def_levels[static_cast<size_t>(i)] != max_def) {
-            builder.push_back_null();
-          } else {
-            builder.push_back_opt(std::string(
-                reinterpret_cast<const char*>(values[static_cast<size_t>(i)].data),
-                static_cast<size_t>(values[static_cast<size_t>(i)].length)));
-          }
-        }
-      }
-      carquet_column_reader_free(col);
-    }
-    return builder.finish();
-  }
-  case CARQUET_PHYSICAL_INT96: {
-    execution::ValueColumnBuilder<timestamp_ms_t> builder(max_def > 0);
-    for (int32_t rg = 0; rg < num_row_groups; ++rg) {
-      carquet_column_reader_t* col =
-          carquet_reader_get_column(reader, rg, leaf_index, &err);
-      if (col == nullptr) {
-        throwCarquetError(err, "Failed to open Carquet column reader");
-      }
-      std::vector<carquet_int96_t> values(4096);
-      std::vector<int16_t> def_levels(4096);
-      while (true) {
-        const int64_t count = carquet_column_read_batch(
-            col, values.data(), static_cast<int64_t>(values.size()),
-            max_def > 0 ? def_levels.data() : nullptr, nullptr);
-        if (count <= 0) {
-          break;
-        }
-        for (int64_t i = 0; i < count; ++i) {
-          if (max_def > 0 && def_levels[static_cast<size_t>(i)] != max_def) {
-            builder.push_back_null();
-          } else {
-            builder.push_back_opt(timestamp_ms_t(
-                int96ToMillis(values[static_cast<size_t>(i)])));
-          }
-        }
-      }
-      carquet_column_reader_free(col);
-    }
-    return builder.finish();
-  }
+  case CARQUET_PHYSICAL_FLOAT:
+    return readFlatColumnAllRowGroups<execution::ValueColumnBuilder<float>>(
+        reader, leaf_index, max_def,
+        [](carquet_column_reader_t* col, auto& builder, int16_t md) {
+          appendFlatValuesFromColumnReader(col, builder, md, sizeof(float));
+        });
+
+  case CARQUET_PHYSICAL_DOUBLE:
+    return readFlatColumnAllRowGroups<execution::ValueColumnBuilder<double>>(
+        reader, leaf_index, max_def,
+        [](carquet_column_reader_t* col, auto& builder, int16_t md) {
+          appendFlatValuesFromColumnReader(col, builder, md, sizeof(double));
+        });
+
+  case CARQUET_PHYSICAL_BYTE_ARRAY:
+    return readFlatColumnAllRowGroups<
+        execution::ValueColumnBuilder<std::string>>(
+        reader, leaf_index, max_def, appendByteArrayValuesFromColumnReader);
+
+  case CARQUET_PHYSICAL_INT96:
+    return readFlatColumnAllRowGroups<
+        execution::ValueColumnBuilder<timestamp_ms_t>>(
+        reader, leaf_index, max_def,
+        appendInt96TimestampValuesFromColumnReader);
+
   default:
     break;
   }

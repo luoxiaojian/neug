@@ -19,13 +19,12 @@
 #include <cstring>
 
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/io/file/file_utils.h"
 #include "neug/utils/io/vfs/file_system.h"
 
 namespace neug {
 namespace reader {
 namespace {
-
-constexpr const char* kFilePrefix = "file://";
 
 struct CarquetPhysicalSpec {
   carquet_physical_type_t physical = CARQUET_PHYSICAL_BYTE_ARRAY;
@@ -33,17 +32,6 @@ struct CarquetPhysicalSpec {
   bool has_logical = false;
   int32_t type_length = 0;
 };
-
-std::string normalizeLocalPath(const std::string& path) {
-  if (path.rfind(kFilePrefix, 0) == 0) {
-    std::string local_path = path.substr(std::strlen(kFilePrefix));
-    if (local_path.empty() || local_path[0] != '/') {
-      local_path = "/" + local_path;
-    }
-    return local_path;
-  }
-  return path;
-}
 
 CarquetPhysicalSpec stringSpec() {
   CarquetPhysicalSpec spec;

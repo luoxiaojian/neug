@@ -599,19 +599,22 @@ endif()
 
 #find arrow----------------------------------------------------------------------
 
-# Parquet extension backend: Arrow/libparquet (ON) or Carquet native C (OFF).
-option(PARQUET_USE_ARROW "Use Arrow/libparquet for Parquet read/export (OFF = Carquet)" OFF)
+# Unified Arrow toggle: when ON, both parquet and httpfs extensions use Arrow;
+# when OFF, parquet uses the native Carquet backend and httpfs uses only libcurl.
+option(USE_ARROW "Use Arrow for parquet (libparquet) and httpfs (Arrow S3/FS) extensions (OFF = no Arrow)" OFF)
+
+# Keep PARQUET_USE_ARROW as an alias so parquet extension CMakeLists.txt works unchanged.
+set(PARQUET_USE_ARROW ${USE_ARROW})
 
 set(NEUG_NEED_ARROW OFF)
 set(NEUG_NEED_CARQUET OFF)
 if(BUILD_EXTENSIONS)
-    if("httpfs" IN_LIST BUILD_EXTENSIONS)
-        set(NEUG_NEED_ARROW ON)
-    endif()
-    if("parquet" IN_LIST BUILD_EXTENSIONS)
-        if(PARQUET_USE_ARROW)
+    if(USE_ARROW)
+        if("httpfs" IN_LIST BUILD_EXTENSIONS OR "parquet" IN_LIST BUILD_EXTENSIONS)
             set(NEUG_NEED_ARROW ON)
-        else()
+        endif()
+    else()
+        if("parquet" IN_LIST BUILD_EXTENSIONS)
             set(NEUG_NEED_CARQUET ON)
         endif()
     endif()
@@ -620,7 +623,7 @@ endif()
 if(NEUG_NEED_CARQUET)
     include(cmake/BuildCarquetAsThirdParty.cmake)
     build_carquet_as_third_party()
-    message(STATUS "Carquet enabled for parquet extension (PARQUET_USE_ARROW=OFF)")
+    message(STATUS "Carquet enabled for parquet extension (USE_ARROW=OFF)")
 endif()
 
 if(NEUG_NEED_ARROW)
@@ -639,13 +642,13 @@ set(CMAKE_DISABLE_FIND_PACKAGE_RapidJSON ON CACHE BOOL "" FORCE)
 message(STATUS "Arrow JSON support enabled (built-in)")
 
 # Configure Arrow Parquet support when parquet extension uses Arrow backend.
-if(BUILD_EXTENSIONS AND "parquet" IN_LIST BUILD_EXTENSIONS AND PARQUET_USE_ARROW)
+if(BUILD_EXTENSIONS AND "parquet" IN_LIST BUILD_EXTENSIONS AND USE_ARROW)
     set(ARROW_ENABLE_PARQUET ON CACHE BOOL "" FORCE)
     message(STATUS "Arrow Parquet support enabled for parquet extension")
 endif()
 
-# Configure Arrow S3 when httpfs is enabled (legacy Arrow adapters in httpfs).
-if(BUILD_EXTENSIONS AND "httpfs" IN_LIST BUILD_EXTENSIONS)
+# Configure Arrow S3 when httpfs is enabled AND USE_ARROW is ON.
+if(BUILD_EXTENSIONS AND "httpfs" IN_LIST BUILD_EXTENSIONS AND USE_ARROW)
     set(ARROW_ENABLE_S3 ON CACHE BOOL "" FORCE)
     message(STATUS "Arrow S3 support enabled for httpfs extension")
 endif()

@@ -21,22 +21,11 @@
 #include <string>
 
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/io/file/file_utils.h"
 
 namespace neug {
 namespace io {
 namespace {
-
-std::string normalizeLocalPath(const std::string& path) {
-  constexpr const char* kFilePrefix = "file://";
-  if (path.starts_with(kFilePrefix)) {
-    std::string local_path = path.substr(strlen(kFilePrefix));
-    if (local_path.empty() || local_path[0] != '/') {
-      local_path = "/" + local_path;
-    }
-    return local_path;
-  }
-  return path;
-}
 
 class FileOutputStream : public OutputStream {
  public:

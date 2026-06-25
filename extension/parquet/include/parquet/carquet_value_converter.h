@@ -28,8 +28,32 @@
 namespace neug {
 namespace reader {
 
-/// Opens a Carquet reader from VFS (local mmap path or in-memory buffer).
-struct CarquetReaderHandle {
+/// RAII handle for a Carquet reader opened from VFS (local mmap or in-memory).
+class CarquetReaderHandle {
+ public:
+  CarquetReaderHandle() = default;
+  ~CarquetReaderHandle() { close(); }
+
+  CarquetReaderHandle(CarquetReaderHandle&& other) noexcept;
+  CarquetReaderHandle& operator=(CarquetReaderHandle&& other) noexcept;
+  CarquetReaderHandle(const CarquetReaderHandle&) = delete;
+  CarquetReaderHandle& operator=(const CarquetReaderHandle&) = delete;
+
+  carquet_reader_t* get() const { return reader; }
+  explicit operator bool() const { return reader != nullptr; }
+  void close();
+
+  /// Read-only accessors for testing.
+  bool buffer_empty() const { return owned_buffer.empty(); }
+  size_t buffer_size() const { return owned_buffer.size(); }
+  /// For testing only: sets a fake reader pointer without opening a file.
+  void set_reader_for_test(carquet_reader_t* r) { reader = r; }
+
+ private:
+  friend CarquetReaderHandle openCarquetReader(fsys::FileSystem&,
+                                               const std::string&,
+                                               const ParquetReadOptions&);
+
   carquet_reader_t* reader = nullptr;
   std::vector<uint8_t> owned_buffer;
 };
@@ -38,7 +62,9 @@ CarquetReaderHandle openCarquetReader(fsys::FileSystem& fs,
                                       const std::string& path,
                                       const ParquetReadOptions& options);
 
-void closeCarquetReader(CarquetReaderHandle& handle);
+/// Converts an INT96 Julian-day-based timestamp to epoch milliseconds.
+/// Clamps to INT64_MIN/INT64_MAX on overflow; validates nanos_since_midnight.
+int64_t int96ToMillis(const carquet_int96_t& value);
 
 std::shared_ptr<execution::IContextColumn> carquetBatchColumnToValueColumn(
     const carquet_row_batch_t* batch, int32_t batch_column_index,

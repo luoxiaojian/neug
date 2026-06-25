@@ -201,3 +201,56 @@ TEST_F(FileUtilsCopyTest, FallbackCopy_EmptyFile) {
 
 }  // namespace test
 }  // namespace neug
+
+// ---------------------------------------------------------------------------
+// Tests for normalizeLocalPath / isLocalPath
+// ---------------------------------------------------------------------------
+namespace neug {
+namespace test {
+
+TEST(PathNormalizationTest, PlainAbsolutePathUnchanged) {
+  EXPECT_EQ(normalizeLocalPath("/tmp/data.csv"), "/tmp/data.csv");
+}
+
+TEST(PathNormalizationTest, FileSchemeStripped) {
+  EXPECT_EQ(normalizeLocalPath("file:///tmp/data.csv"), "/tmp/data.csv");
+}
+
+TEST(PathNormalizationTest, FileSchemeRelativeGetsSlash) {
+  // file://relative becomes /relative
+  EXPECT_EQ(normalizeLocalPath("file://relative/path.csv"), "/relative/path.csv");
+}
+
+TEST(PathNormalizationTest, FileSchemeEmptySuffix) {
+  EXPECT_EQ(normalizeLocalPath("file://"), "/");
+}
+
+TEST(PathNormalizationTest, NonFileSchemeUnchanged) {
+  EXPECT_EQ(normalizeLocalPath("s3://bucket/key"), "s3://bucket/key");
+  EXPECT_EQ(normalizeLocalPath("http://host/path"), "http://host/path");
+}
+
+TEST(PathNormalizationTest, EmptyStringUnchanged) {
+  EXPECT_EQ(normalizeLocalPath(""), "");
+}
+
+TEST(IsLocalPathTest, PlainPathIsLocal) {
+  EXPECT_TRUE(isLocalPath("/tmp/data.csv"));
+  EXPECT_TRUE(isLocalPath("relative/path.csv"));
+}
+
+TEST(IsLocalPathTest, FileSchemeIsLocal) {
+  EXPECT_TRUE(isLocalPath("file:///tmp/data.csv"));
+}
+
+TEST(IsLocalPathTest, S3SchemeIsNotLocal) {
+  EXPECT_FALSE(isLocalPath("s3://bucket/key"));
+}
+
+TEST(IsLocalPathTest, HttpSchemeIsNotLocal) {
+  EXPECT_FALSE(isLocalPath("http://host/path"));
+  EXPECT_FALSE(isLocalPath("https://host/path"));
+}
+
+}  // namespace test
+}  // namespace neug

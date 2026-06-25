@@ -42,6 +42,24 @@
 
 namespace neug {
 
+std::string normalizeLocalPath(const std::string& path) {
+  constexpr const char* kFilePrefix = "file://";
+  constexpr size_t kPrefixLen = 7;  // strlen("file://")
+  if (path.size() >= kPrefixLen && path.rfind(kFilePrefix, 0) == 0) {
+    std::string local_path = path.substr(kPrefixLen);
+    if (local_path.empty() || local_path[0] != '/') {
+      local_path = "/" + local_path;
+    }
+    return local_path;
+  }
+  return path;
+}
+
+bool isLocalPath(const std::string& path) {
+  const auto pos = path.find("://");
+  return pos == std::string::npos || path.rfind("file://", 0) == 0;
+}
+
 namespace file_utils {
 
 /**

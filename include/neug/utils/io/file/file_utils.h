@@ -21,6 +21,12 @@
 
 namespace neug {
 
+/// Strip "file://" prefix and normalize to an absolute local path.
+std::string normalizeLocalPath(const std::string& path);
+
+/// Return true if path has no scheme or uses "file://".
+bool isLocalPath(const std::string& path);
+
 namespace file_utils {
 
 /**

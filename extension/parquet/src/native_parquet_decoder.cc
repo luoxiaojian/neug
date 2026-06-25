@@ -109,7 +109,7 @@ class CarquetFileChunkSupplier : public IDataChunkSupplier {
     ensureOpen();
     if (has_nested_) {
       auto chunk = std::make_shared<execution::DataChunk>(
-          readCarquetProjectedColumns(reader_handle_.reader, projected_));
+          readCarquetProjectedColumns(reader_handle_.get(), projected_));
       finished_ = true;
       return chunk;
     }
@@ -148,16 +148,16 @@ class CarquetFileChunkSupplier : public IDataChunkSupplier {
       carquet_thread_pool_destroy(thread_pool_);
       thread_pool_ = nullptr;
     }
-    closeCarquetReader(reader_handle_);
+    reader_handle_.close();
   }
 
   void ensureOpen() {
-    if (batch_reader_ != nullptr || reader_handle_.reader != nullptr) {
+    if (batch_reader_ != nullptr || reader_handle_.get() != nullptr) {
       return;
     }
     reader_handle_ = openCarquetReader(*fs_, path_, options_);
-    row_num_ = carquet_reader_num_rows(reader_handle_.reader);
-    const auto* schema = carquet_reader_schema(reader_handle_.reader);
+    row_num_ = carquet_reader_num_rows(reader_handle_.get());
+    const auto* schema = carquet_reader_schema(reader_handle_.get());
     projected_ = resolveCarquetProjectedColumns(schema, read_column_names_);
     has_nested_ = std::any_of(
         projected_.begin(), projected_.end(), [](const CarquetProjectedColumn& col) {
@@ -171,7 +171,7 @@ class CarquetFileChunkSupplier : public IDataChunkSupplier {
     physical_types_ = projectedPhysicalTypes(schema, column_indices_);
     logical_types_ = projectedLogicalTypes(schema, column_indices_);
     if (!has_nested_) {
-      batch_reader_ = createBatchReader(reader_handle_.reader, options_,
+      batch_reader_ = createBatchReader(reader_handle_.get(), options_,
                                         read_column_names_, &thread_pool_);
     }
   }
@@ -230,9 +230,9 @@ result<std::shared_ptr<EntrySchema>> NativeParquetDecoder::inferSchema(
   }
 
   auto handle = openCarquetReader(fs, paths.front(), options);
-  const auto* schema = carquet_reader_schema(handle.reader);
+  const auto* schema = carquet_reader_schema(handle.get());
   auto converted = carquetSchemaToEntrySchema(schema);
-  closeCarquetReader(handle);
+  handle.close();
   return converted;
 }
 
@@ -247,15 +247,15 @@ NativeParquetDecoder::openSuppliers(fsys::FileSystem& fs,
   }
 
   auto probe = openCarquetReader(fs, file_paths.front(), options);
-  const auto* schema = carquet_reader_schema(probe.reader);
+  const auto* schema = carquet_reader_schema(probe.get());
   const auto read_column_names = entryColumnNames(state);
   for (const auto& name : read_column_names) {
     if (carquetSchemaFindTopLevelColumn(schema, name.c_str()) < 0) {
-      closeCarquetReader(probe);
+      probe.close();
       THROW_SCHEMA_MISMATCH("Column '" + name + "' not found in Parquet file");
     }
   }
-  closeCarquetReader(probe);
+  probe.close();
 
   std::vector<std::shared_ptr<IDataChunkSupplier>> suppliers;
   suppliers.reserve(file_paths.size());
