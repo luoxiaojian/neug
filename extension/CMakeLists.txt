@@ -102,15 +102,12 @@ function(add_extension_test)
     if(ARG_EXTRA_INCLUDE_DIRS)
         target_include_directories(${_test_name} PRIVATE SYSTEM ${ARG_EXTRA_INCLUDE_DIRS})
     endif()
-    target_link_libraries(${_test_name} PUBLIC
-        neug::GTest
-        neug
-        ${GLOG_LIBRARIES}
-        ${ARROW_LIB}
-        ${Protobuf_LIBRARIES}
-        ${ARG_EXTRA_LINK_LIBS}
-        ${OPENSSL_LIBRARIES}
-        ${CRYPTO_LIB})
+    set(_test_link_libs neug::GTest neug ${GLOG_LIBRARIES} ${Protobuf_LIBRARIES}
+        ${ARG_EXTRA_LINK_LIBS} ${OPENSSL_LIBRARIES} ${CRYPTO_LIB})
+    if(NEUG_NEED_ARROW AND ARROW_LIB)
+        list(APPEND _test_link_libs ${ARROW_LIB})
+    endif()
+    target_link_libraries(${_test_name} PUBLIC ${_test_link_libs})
     if(ENABLE_GCOV)
         target_compile_options(${_test_name} PRIVATE --coverage)
         target_link_options(${_test_name} PRIVATE --coverage)

@@ -59,14 +59,27 @@ class NeugRandomAccessFile : public arrow::io::RandomAccessFile {
 
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes,
                                 void* out) override {
-    ARROW_RETURN_NOT_OK(Seek(position));
-    return Read(nbytes, out);
+    if (file_ == nullptr || file_->Closed()) {
+      return arrow::Status::IOError("File is closed");
+    }
+    int64_t bytes_read = 0;
+    auto status = file_->ReadAt(position, nbytes, out, &bytes_read);
+    if (!status.ok()) {
+      return arrow::Status::IOError(status.ToString());
+    }
+    return bytes_read;
   }
 
   arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position,
                                                        int64_t nbytes) override {
-    ARROW_RETURN_NOT_OK(Seek(position));
-    return Read(nbytes);
+    ARROW_ASSIGN_OR_RAISE(auto buffer, arrow::AllocateResizableBuffer(nbytes));
+    ARROW_ASSIGN_OR_RAISE(int64_t bytes_read,
+                          ReadAt(position, nbytes, buffer->mutable_data()));
+    if (bytes_read < nbytes) {
+      RETURN_NOT_OK(buffer->Resize(bytes_read));
+      buffer->ZeroPadding();
+    }
+    return buffer;
   }
 
   arrow::Status Seek(int64_t position) override {

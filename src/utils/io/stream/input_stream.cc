@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <streambuf>
 #include <vector>
 
@@ -55,11 +56,18 @@ class LocalRandomAccessFile : public RandomAccessFile {
     position_ = 0;
   }
 
-  int64_t Tell() const override { return position_; }
+  int64_t Tell() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return position_;
+  }
 
-  int64_t Size() override { return size_; }
+  int64_t Size() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return size_;
+  }
 
   neug::Status Seek(int64_t position) override {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (closed_) {
       return neug::Status(StatusCode::ERR_IO_ERROR, "File is closed");
     }
@@ -67,6 +75,7 @@ class LocalRandomAccessFile : public RandomAccessFile {
       return neug::Status(StatusCode::ERR_INVALID_ARGUMENT,
                           "Negative seek position");
     }
+    stream_.clear();
     stream_.seekg(position, std::ios::beg);
     if (!stream_) {
       return neug::Status(StatusCode::ERR_IO_ERROR,
@@ -77,6 +86,7 @@ class LocalRandomAccessFile : public RandomAccessFile {
   }
 
   neug::Status Read(int64_t nbytes, void* out, int64_t* bytes_read) override {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (bytes_read == nullptr) {
       return neug::Status(StatusCode::ERR_INVALID_ARGUMENT,
                           "bytes_read output is null");
@@ -88,6 +98,7 @@ class LocalRandomAccessFile : public RandomAccessFile {
     if (nbytes <= 0) {
       return neug::Status::OK();
     }
+    stream_.clear();
     stream_.read(static_cast<char*>(out), static_cast<std::streamsize>(nbytes));
     *bytes_read = stream_.gcount();
     position_ += *bytes_read;
@@ -98,7 +109,43 @@ class LocalRandomAccessFile : public RandomAccessFile {
     return neug::Status::OK();
   }
 
+  neug::Status ReadAt(int64_t position, int64_t nbytes, void* out,
+                      int64_t* bytes_read) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (bytes_read == nullptr) {
+      return neug::Status(StatusCode::ERR_INVALID_ARGUMENT,
+                          "bytes_read output is null");
+    }
+    *bytes_read = 0;
+    if (closed_) {
+      return neug::Status(StatusCode::ERR_IO_ERROR, "File is closed");
+    }
+    if (nbytes <= 0) {
+      position_ = position;
+      return neug::Status::OK();
+    }
+    if (position < 0) {
+      return neug::Status(StatusCode::ERR_INVALID_ARGUMENT,
+                          "Negative read position");
+    }
+    stream_.clear();
+    stream_.seekg(position, std::ios::beg);
+    if (!stream_) {
+      return neug::Status(StatusCode::ERR_IO_ERROR,
+                          "Failed to seek file: " + path_);
+    }
+    stream_.read(static_cast<char*>(out), static_cast<std::streamsize>(nbytes));
+    *bytes_read = stream_.gcount();
+    position_ = position + *bytes_read;
+    if (*bytes_read == 0 && !stream_.eof()) {
+      return neug::Status(StatusCode::ERR_IO_ERROR,
+                          "Failed to read file: " + path_);
+    }
+    return neug::Status::OK();
+  }
+
   neug::Status Close() override {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!closed_) {
       stream_.close();
       closed_ = true;
@@ -106,7 +153,10 @@ class LocalRandomAccessFile : public RandomAccessFile {
     return neug::Status::OK();
   }
 
-  bool Closed() const override { return closed_; }
+  bool Closed() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return closed_;
+  }
 
  private:
   std::string path_;
@@ -114,6 +164,7 @@ class LocalRandomAccessFile : public RandomAccessFile {
   int64_t size_ = -1;
   int64_t position_ = 0;
   bool closed_ = false;
+  mutable std::mutex mutex_;
 };
 
 class RandomAccessStreambuf : public std::streambuf {

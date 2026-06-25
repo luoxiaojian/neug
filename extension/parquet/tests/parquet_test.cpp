@@ -15,12 +15,6 @@
  */
 
 #include <gtest/gtest.h>
-#include <arrow/api.h>
-#include <arrow/filesystem/localfs.h>
-#include <arrow/io/file.h>
-#include <arrow/io/caching.h>
-#include <parquet/arrow/writer.h>
-#include <parquet/arrow/reader.h>
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -36,10 +30,18 @@
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/io/vfs/file_system.h"
 
-#include "../../extension/parquet/include/parquet/arrow_reader.h"
+#include "../../extension/parquet/include/parquet/parquet_reader.h"
+#include "parquet_test_helpers.h"
 #include "../../extension/parquet/include/parquet_options.h"
-#include "../../extension/parquet/include/parquet_export_function.h"
 #include "neug/generated/proto/response/response.pb.h"
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
+#include <arrow/api.h>
+#include <arrow/filesystem/localfs.h>
+#include <arrow/io/file.h>
+#include <parquet/arrow/reader.h>
+#include <parquet/arrow/writer.h>
+#include "../../extension/parquet/include/parquet_export_function.h"
+#endif
 
 namespace neug {
 namespace test {
@@ -63,49 +65,9 @@ class ParquetTest : public ::testing::Test {
 
   // Helper function to create a simple Parquet file
   void createSimpleParquetFile(const std::string& filename) {
-    // Create Arrow schema
-    auto schema = arrow::schema({
-        arrow::field("id", arrow::int64()),
-        arrow::field("name", arrow::utf8()),
-        arrow::field("value", arrow::float64())
-    });
-
-    // Create data
-    arrow::Int64Builder id_builder;
-    arrow::StringBuilder name_builder;
-    arrow::DoubleBuilder value_builder;
-
-    ASSERT_TRUE(id_builder.Append(1).ok());
-    ASSERT_TRUE(id_builder.Append(2).ok());
-    ASSERT_TRUE(id_builder.Append(3).ok());
-
-    ASSERT_TRUE(name_builder.Append("Alice").ok());
-    ASSERT_TRUE(name_builder.Append("Bob").ok());
-    ASSERT_TRUE(name_builder.Append("Charlie").ok());
-
-    ASSERT_TRUE(value_builder.Append(10.5).ok());
-    ASSERT_TRUE(value_builder.Append(20.3).ok());
-    ASSERT_TRUE(value_builder.Append(30.7).ok());
-
-    std::shared_ptr<arrow::Array> id_array;
-    std::shared_ptr<arrow::Array> name_array;
-    std::shared_ptr<arrow::Array> value_array;
-
-    ASSERT_TRUE(id_builder.Finish(&id_array).ok());
-    ASSERT_TRUE(name_builder.Finish(&name_array).ok());
-    ASSERT_TRUE(value_builder.Finish(&value_array).ok());
-
-    // Create table
-    auto table = arrow::Table::Make(schema, {id_array, name_array, value_array});
-
-    // Write to Parquet file
-    std::string filepath = std::string(PARQUET_TEST_DIR) + "/" + filename;
-    std::shared_ptr<arrow::io::FileOutputStream> outfile;
-    PARQUET_ASSIGN_OR_THROW(outfile, arrow::io::FileOutputStream::Open(filepath));
-
-    PARQUET_THROW_NOT_OK(
-        parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 3));
+    writeSimpleParquetFile(PARQUET_TEST_DIR, filename);
   }
+
 
   // Helper function to create DataType as shared_ptr
   std::shared_ptr<::common::DataType> createInt64Type() {
@@ -192,22 +154,23 @@ class ParquetTest : public ::testing::Test {
   }
 
   execution::Context readToContext(
-      const std::shared_ptr<reader::ArrowReader>& reader,
+      const std::shared_ptr<reader::ParquetReader>& reader,
       const std::shared_ptr<reader::ReadSharedState>& sharedState) {
     return reader::toContext(reader->read(), *sharedState);
   }
 
-  std::shared_ptr<reader::ArrowReader> createParquetReader(
+  std::shared_ptr<reader::ParquetReader> createParquetReader(
       const std::shared_ptr<reader::ReadSharedState>& sharedState) {
     fsys::FileSystemRegistry registry;
     auto fs = registry.Provide(sharedState->schema.file);
     auto optionsBuilder =
         std::make_unique<reader::ParquetOptionsBuilder>(sharedState);
-    return std::make_shared<reader::ArrowReader>(
+    return std::make_shared<reader::ParquetReader>(
         sharedState, std::move(optionsBuilder), std::move(fs));
   }
 };
 
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
 // =============================================================================
 // Test Suite 1: Options Translation Tests
 // Verify that Neug options are correctly translated to Arrow Parquet configuration
@@ -384,6 +347,34 @@ TEST_F(ParquetTest, TestFileFormatConfiguration_UsesParquetBatchRows) {
   EXPECT_EQ(options.arrow_reader_properties->batch_size(), 2048);
 }
 
+
+#else
+
+TEST_F(ParquetTest, TestCarquetOptions_BuildsValidParquetReadOptions) {
+  createSimpleParquetFile("test_options_carquet.parquet");
+  auto sharedState = createSharedState(
+      "test_options_carquet.parquet", {"id", "name", "value"},
+      {createInt64Type(), createStringType(), createDoubleType()}, {});
+  reader::ParquetOptionsBuilder optionsBuilder(sharedState);
+  auto options = optionsBuilder.build();
+  EXPECT_EQ(options.batch_size, 65536);
+  EXPECT_TRUE(options.use_threads);
+}
+
+TEST_F(ParquetTest, TestCarquetOptions_ParquetBatchRows) {
+  createSimpleParquetFile("test_batch_rows_carquet.parquet");
+  const int64_t custom_batch_rows = 4096;
+  auto sharedState = createSharedState(
+      "test_batch_rows_carquet.parquet", {"id", "name", "value"},
+      {createInt64Type(), createStringType(), createDoubleType()},
+      {{"PARQUET_BATCH_ROWS", std::to_string(custom_batch_rows)}});
+  reader::ParquetOptionsBuilder optionsBuilder(sharedState);
+  auto options = optionsBuilder.build();
+  EXPECT_EQ(options.batch_size, custom_batch_rows);
+}
+
+#endif
+
 // =============================================================================
 // Test Suite 2: Type Mapping Tests
 // Verify type conversion between Neug DataType and Arrow types
@@ -410,39 +401,9 @@ TEST_F(ParquetTest, TestTypeMapping_StringToLargeUtf8) {
 }
 
 TEST_F(ParquetTest, TestTypeMapping_PreserveNumericTypes) {
-  // Create Parquet file with various numeric types
-  auto schema = arrow::schema({
-      arrow::field("int32_col", arrow::int32()),
-      arrow::field("int64_col", arrow::int64()),
-      arrow::field("double_col", arrow::float64()),
-      arrow::field("bool_col", arrow::boolean())
-  });
+  writeNumericTypesParquetFile(PARQUET_TEST_DIR, "test_numeric_types.parquet");
 
-  arrow::Int32Builder int32_builder;
-  arrow::Int64Builder int64_builder;
-  arrow::DoubleBuilder double_builder;
-  arrow::BooleanBuilder bool_builder;
-
-  ASSERT_TRUE(int32_builder.Append(42).ok());
-  ASSERT_TRUE(int64_builder.Append(9223372036854775807LL).ok());
-  ASSERT_TRUE(double_builder.Append(3.14159).ok());
-  ASSERT_TRUE(bool_builder.Append(true).ok());
-
-  std::shared_ptr<arrow::Array> arrays[4];
-  ASSERT_TRUE(int32_builder.Finish(&arrays[0]).ok());
-  ASSERT_TRUE(int64_builder.Finish(&arrays[1]).ok());
-  ASSERT_TRUE(double_builder.Finish(&arrays[2]).ok());
-  ASSERT_TRUE(bool_builder.Finish(&arrays[3]).ok());
-
-  auto table = arrow::Table::Make(schema, {arrays[0], arrays[1], arrays[2], arrays[3]});
-
-  std::string filepath = std::string(PARQUET_TEST_DIR) + "/test_numeric_types.parquet";
-  std::shared_ptr<arrow::io::FileOutputStream> outfile;
-  PARQUET_ASSIGN_OR_THROW(outfile, arrow::io::FileOutputStream::Open(filepath));
-  PARQUET_THROW_NOT_OK(
-      parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 1));
-
-  // Read with Neug types
+  // Read with NeuG types
   auto sharedState = createSharedState(
       "test_numeric_types.parquet",
       {"int32_col", "int64_col", "double_col", "bool_col"},
@@ -467,36 +428,8 @@ TEST_F(ParquetTest, TestTypeMapping_PreserveNumericTypes) {
 // =============================================================================
 
 TEST_F(ParquetTest, TestIntegration_ColumnPruning) {
-  // Create Parquet file with 4 columns
-  auto schema = arrow::schema({
-      arrow::field("id", arrow::int32()),
-      arrow::field("name", arrow::utf8()),
-      arrow::field("score", arrow::float64()),
-      arrow::field("grade", arrow::utf8())
-  });
-
-  arrow::Int32Builder id_builder;
-  arrow::StringBuilder name_builder, grade_builder;
-  arrow::DoubleBuilder score_builder;
-  
-  ASSERT_TRUE(id_builder.Append(1).ok());
-  ASSERT_TRUE(name_builder.Append("Alice").ok());
-  ASSERT_TRUE(score_builder.Append(95.5).ok());
-  ASSERT_TRUE(grade_builder.Append("A").ok());
-
-  std::shared_ptr<arrow::Array> id_array, name_array, score_array, grade_array;
-  ASSERT_TRUE(id_builder.Finish(&id_array).ok());
-  ASSERT_TRUE(name_builder.Finish(&name_array).ok());
-  ASSERT_TRUE(score_builder.Finish(&score_array).ok());
-  ASSERT_TRUE(grade_builder.Finish(&grade_array).ok());
-
-  auto table = arrow::Table::Make(schema, {id_array, name_array, score_array, grade_array});
-  
-  std::string filepath = std::string(PARQUET_TEST_DIR) + "/test_pruning.parquet";
-  std::shared_ptr<arrow::io::FileOutputStream> outfile;
-  PARQUET_ASSIGN_OR_THROW(outfile, arrow::io::FileOutputStream::Open(filepath));
-  PARQUET_THROW_NOT_OK(
-      parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 1));
+  writePruningParquetFile(PARQUET_TEST_DIR, "test_pruning.parquet");
+  const std::string filepath = std::string(PARQUET_TEST_DIR) + "/test_pruning.parquet";
 
   // Set up shared state with projectColumns
   auto sharedState = std::make_shared<reader::ReadSharedState>();
@@ -530,39 +463,8 @@ TEST_F(ParquetTest, TestIntegration_ColumnPruning) {
 }
 
 TEST_F(ParquetTest, TestIntegration_FilterPushdown) {
-  // Create Parquet file with test data
-  auto schema = arrow::schema({
-      arrow::field("id", arrow::int32()),
-      arrow::field("score", arrow::float64())
-  });
-
-  arrow::Int32Builder id_builder;
-  arrow::DoubleBuilder score_builder;
-  
-  std::vector<std::pair<int32_t, double>> test_data = {
-      {1, 95.5},
-      {2, 87.0},
-      {3, 92.5},
-      {4, 78.0},
-      {5, 98.0}
-  };
-  
-  for (const auto& [id, score] : test_data) {
-    ASSERT_TRUE(id_builder.Append(id).ok());
-    ASSERT_TRUE(score_builder.Append(score).ok());
-  }
-
-  std::shared_ptr<arrow::Array> id_array, score_array;
-  ASSERT_TRUE(id_builder.Finish(&id_array).ok());
-  ASSERT_TRUE(score_builder.Finish(&score_array).ok());
-
-  auto table = arrow::Table::Make(schema, {id_array, score_array});
-  
-  std::string filepath = std::string(PARQUET_TEST_DIR) + "/test_filter.parquet";
-  std::shared_ptr<arrow::io::FileOutputStream> outfile;
-  PARQUET_ASSIGN_OR_THROW(outfile, arrow::io::FileOutputStream::Open(filepath));
-  PARQUET_THROW_NOT_OK(
-      parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 5));
+  writeFilterParquetFile(PARQUET_TEST_DIR, "test_filter.parquet");
+  const std::string filepath = std::string(PARQUET_TEST_DIR) + "/test_filter.parquet";
 
   // Create Neug filter expression: score > 90.0
   auto filterExpr = std::make_shared<::common::Expression>();
@@ -613,7 +515,7 @@ TEST_F(ParquetTest, TestIntegration_FilterPushdown) {
 }
 
 TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
-  createSimpleParquetFile("test_batch_mode.parquet");
+  writeBatchModeParquetFile(PARQUET_TEST_DIR, "test_batch_mode.parquet");
 
   auto sharedState = createSharedState(
       "test_batch_mode.parquet",
@@ -647,47 +549,9 @@ TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
 }
 
 TEST_F(ParquetTest, TestIntegration_CombinedFilterAndProjection) {
-  // Create Parquet file
-  auto schema = arrow::schema({
-      arrow::field("id", arrow::int32()),
-      arrow::field("name", arrow::utf8()),
-      arrow::field("score", arrow::float64()),
-      arrow::field("grade", arrow::utf8())
-  });
+  writeCombinedParquetFile(PARQUET_TEST_DIR, "test_combined.parquet");
+  const std::string filepath = std::string(PARQUET_TEST_DIR) + "/test_combined.parquet";
 
-  arrow::Int32Builder id_builder;
-  arrow::StringBuilder name_builder, grade_builder;
-  arrow::DoubleBuilder score_builder;
-  
-  std::vector<std::tuple<int32_t, std::string, double, std::string>> test_data = {
-      {1, "Alice", 95.5, "A"},
-      {2, "Bob", 87.0, "B"},
-      {3, "Charlie", 92.5, "A"},
-      {4, "David", 78.0, "C"}
-  };
-  
-  for (const auto& [id, name, score, grade] : test_data) {
-    ASSERT_TRUE(id_builder.Append(id).ok());
-    ASSERT_TRUE(name_builder.Append(name).ok());
-    ASSERT_TRUE(score_builder.Append(score).ok());
-    ASSERT_TRUE(grade_builder.Append(grade).ok());
-  }
-
-  std::shared_ptr<arrow::Array> id_array, name_array, score_array, grade_array;
-  ASSERT_TRUE(id_builder.Finish(&id_array).ok());
-  ASSERT_TRUE(name_builder.Finish(&name_array).ok());
-  ASSERT_TRUE(score_builder.Finish(&score_array).ok());
-  ASSERT_TRUE(grade_builder.Finish(&grade_array).ok());
-
-  auto table = arrow::Table::Make(schema, {id_array, name_array, score_array, grade_array});
-  
-  std::string filepath = std::string(PARQUET_TEST_DIR) + "/test_combined.parquet";
-  std::shared_ptr<arrow::io::FileOutputStream> outfile;
-  PARQUET_ASSIGN_OR_THROW(outfile, arrow::io::FileOutputStream::Open(filepath));
-  PARQUET_THROW_NOT_OK(
-      parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 4));
-
-  // Create Neug filter: score > 90.0
   auto filterExpr = std::make_shared<::common::Expression>();
   auto var_opr = filterExpr->add_operators();
   var_opr->mutable_var()->mutable_tag()->set_name("score");
@@ -696,11 +560,10 @@ TEST_F(ParquetTest, TestIntegration_CombinedFilterAndProjection) {
   auto const_opr = filterExpr->add_operators();
   const_opr->mutable_const_()->set_f64(90.0);
 
-  // Set up shared state with both filter and column pruning
   auto sharedState = std::make_shared<reader::ReadSharedState>();
   auto entrySchema = std::make_shared<reader::TableEntrySchema>();
   entrySchema->columnNames = {"id", "name", "score", "grade"};
-  entrySchema->columnTypes = {createInt32Type(), createStringType(), 
+  entrySchema->columnTypes = {createInt32Type(), createStringType(),
                                createDoubleType(), createStringType()};
 
   reader::FileSchema fileSchema;
@@ -712,13 +575,12 @@ TEST_F(ParquetTest, TestIntegration_CombinedFilterAndProjection) {
   externalSchema.entry = entrySchema;
   externalSchema.file = fileSchema;
   sharedState->schema = std::move(externalSchema);
-  sharedState->projectColumns = {"id", "score", "grade"};  // Exclude "name"
-  sharedState->skipRows = filterExpr;   // Filter score > 90.0
+  sharedState->projectColumns = {"id", "score", "grade"};
+  sharedState->skipRows = filterExpr;
 
   auto reader = createParquetReader(sharedState);
   execution::Context ctx = readToContext(reader, sharedState);
 
-  // Verify extension correctly combines filter and projection
   EXPECT_EQ(ctx.col_num(), 3)
       << "Extension should apply column pruning (3 of 4 columns)";
   EXPECT_EQ(ctx.row_num(), 2)
@@ -733,25 +595,10 @@ TEST_F(ParquetTest, TestIntegration_CombinedFilterAndProjection) {
 // =============================================================================
 
 TEST_F(ParquetTest, TestMultiFile_ExplicitPaths) {
-  // Create multiple Parquet files
   for (int fileIdx = 0; fileIdx < 3; ++fileIdx) {
-    auto schema = arrow::schema({arrow::field("id", arrow::int32())});
-    arrow::Int32Builder builder;
-    
-    for (int i = 0; i < 10; ++i) {
-      ASSERT_TRUE(builder.Append(fileIdx * 10 + i).ok());
-    }
-    
-    std::shared_ptr<arrow::Array> array;
-    ASSERT_TRUE(builder.Finish(&array).ok());
-    auto table = arrow::Table::Make(schema, {array});
-    
-    std::string filepath = std::string(PARQUET_TEST_DIR) + "/test_multi_" + 
-                          std::to_string(fileIdx) + ".parquet";
-    std::shared_ptr<arrow::io::FileOutputStream> outfile;
-    PARQUET_ASSIGN_OR_THROW(outfile, arrow::io::FileOutputStream::Open(filepath));
-    PARQUET_THROW_NOT_OK(
-        parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 10));
+    writeMultiFileParquet(PARQUET_TEST_DIR,
+                          "test_multi_" + std::to_string(fileIdx) + ".parquet",
+                          fileIdx * 10, 10);
   }
 
   // Extension should handle multiple explicit file paths
@@ -782,6 +629,7 @@ TEST_F(ParquetTest, TestMultiFile_ExplicitPaths) {
       << "Extension should correctly read and concatenate multiple Parquet files";
 }
 
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
 // =============================================================================
 // Test Suite: Parquet Export Tests
 // Test ArrowParquetExportWriter functionality
@@ -1715,6 +1563,8 @@ TEST_F(ParquetTest, TestParquetExportWithPathType) {
 // Test Suite: Schema Validation
 // Verify reader-level column existence check
 // =============================================================================
+
+#endif
 
 TEST_F(ParquetTest, TestParquetNonExistentColumnThrows) {
   createSimpleParquetFile("test_nonexist.parquet");
