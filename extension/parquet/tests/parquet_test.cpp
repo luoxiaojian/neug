@@ -31,6 +31,7 @@
 #include "neug/generated/proto/plan/basic_type.pb.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/io/read/common/options.h"
+#include "neug/utils/io/read/common/reader_utils.h"
 #include "neug/utils/io/reader.h"
 #include "neug/utils/io/read/common/schema.h"
 
@@ -186,6 +187,12 @@ class ParquetTest : public ::testing::Test {
     sharedState->schema = std::move(externalSchema);
 
     return sharedState;
+  }
+
+  execution::Context readToContext(
+      const std::shared_ptr<reader::ArrowReader>& reader,
+      const std::shared_ptr<reader::ReadSharedState>& sharedState) {
+    return reader::toContext(reader->read(), *sharedState);
   }
 
   std::shared_ptr<reader::ArrowReader> createParquetReader(
@@ -442,9 +449,7 @@ TEST_F(ParquetTest, TestTypeMapping_StringToLargeUtf8) {
       {{"batch_read", "false"}});
   
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Verify string column is converted to large_utf8
   auto col1 = ctx.columns[1];
@@ -493,9 +498,7 @@ TEST_F(ParquetTest, TestTypeMapping_PreserveNumericTypes) {
       {{"batch_read", "false"}});
 
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   EXPECT_EQ(ctx.col_num(), 4);
   EXPECT_EQ(ctx.row_num(), 1);
@@ -564,9 +567,7 @@ TEST_F(ParquetTest, TestIntegration_ColumnPruning) {
   sharedState->projectColumns = {"id", "score", "grade"};
 
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Verify extension translates projectColumns to Arrow projection
   // Should have 3 columns (id, score, grade - "name" is excluded)
@@ -642,9 +643,7 @@ TEST_F(ParquetTest, TestIntegration_FilterPushdown) {
   sharedState->skipRows = filterExpr;  // Neug's filter expression
 
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Verify extension translates Neug filter to Arrow filter
   EXPECT_EQ(ctx.col_num(), 2);
@@ -668,8 +667,7 @@ TEST_F(ParquetTest, TestIntegration_FilterPushdown) {
 
 TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
   createSimpleParquetFile("test_batch_mode.parquet");
-  
-  // Test with batch_read=true (streaming mode)
+
   auto sharedState = createSharedState(
       "test_batch_mode.parquet",
       {"id", "name", "value"},
@@ -677,17 +675,15 @@ TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
       {{"batch_read", "true"}});
 
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  auto supplier = reader->read();
+  ASSERT_NE(supplier, nullptr);
+  int total_rows = 0;
+  while (auto chunk = supplier->GetNextChunk()) {
+    EXPECT_EQ(chunk->col_num(), 3u);
+    total_rows += static_cast<int>(chunk->row_num());
+  }
+  EXPECT_GT(total_rows, 0);
 
-  EXPECT_EQ(ctx.col_num(), 3);
-  // Verify extension translates batch_read option to streaming column type
-  auto col0 = ctx.columns[0];
-  EXPECT_EQ(col0->column_type(), execution::ContextColumnType::kChunkStream)
-      << "Extension should use ChunkStream column type when batch_read=true";
-  
-  // Test with batch_read=false (full read mode)
   auto sharedState2 = createSharedState(
       "test_batch_mode.parquet",
       {"id", "name", "value"},
@@ -695,10 +691,9 @@ TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
       {{"batch_read", "false"}});
 
   auto reader2 = createParquetReader(sharedState2);
-  auto localState2 = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx2;
-  reader2->read(localState2, ctx2);
+  execution::Context ctx2 = readToContext(reader2, sharedState2);
 
+  EXPECT_EQ(ctx2.col_num(), 3);
   auto col0_2 = ctx2.columns[0];
   EXPECT_EQ(col0_2->column_type(), execution::ContextColumnType::kValue)
       << "Extension should use Value column type when batch_read=false";
@@ -774,9 +769,7 @@ TEST_F(ParquetTest, TestIntegration_CombinedFilterAndProjection) {
   sharedState->skipRows = filterExpr;   // Filter score > 90.0
 
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Verify extension correctly combines filter and projection
   EXPECT_EQ(ctx.col_num(), 3)
@@ -835,9 +828,7 @@ TEST_F(ParquetTest, TestMultiFile_ExplicitPaths) {
   sharedState->schema = std::move(externalSchema);
 
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   EXPECT_EQ(ctx.col_num(), 1);
   EXPECT_EQ(ctx.row_num(), 30)
@@ -912,9 +903,7 @@ TEST_F(ParquetTest, TestParquetExportWriter) {
       {{"batch_read", "false"}});
   
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
   
   EXPECT_EQ(ctx.col_num(), 3);
   EXPECT_EQ(ctx.row_num(), 3);
@@ -972,9 +961,7 @@ TEST_F(ParquetTest, TestParquetExportWithNulls) {
       {{"batch_read", "false"}});
   
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
   
   EXPECT_EQ(ctx.col_num(), 2);
   EXPECT_EQ(ctx.row_num(), 3);
@@ -1168,9 +1155,7 @@ TEST_F(ParquetTest, TestParquetExportWithCompressionOptions) {
       {{"batch_read", "false"}});
   
   auto reader_zstd = createParquetReader(sharedState_zstd);
-  auto localState_zstd = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx_zstd;
-  reader_zstd->read(localState_zstd, ctx_zstd);
+  execution::Context ctx_zstd = readToContext(reader_zstd, sharedState_zstd);
   EXPECT_EQ(ctx_zstd.row_num(), 100);
   
   auto sharedState_none = createSharedState(
@@ -1180,9 +1165,7 @@ TEST_F(ParquetTest, TestParquetExportWithCompressionOptions) {
       {{"batch_read", "false"}});
   
   auto reader_none = createParquetReader(sharedState_none);
-  auto localState_none = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx_none;
-  reader_none->read(localState_none, ctx_none);
+  execution::Context ctx_none = readToContext(reader_none, sharedState_none);
   EXPECT_EQ(ctx_none.row_num(), 100);
 }
 
@@ -1260,9 +1243,7 @@ TEST_F(ParquetTest, TestParquetExportWithRowGroupSize) {
       {{"batch_read", "false"}});
   
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
   EXPECT_EQ(ctx.row_num(), 100);
 }
 
@@ -1348,9 +1329,7 @@ TEST_F(ParquetTest, TestParquetExportWithDictionaryEncoding) {
       {{"batch_read", "false"}});
   
   auto reader_dict = createParquetReader(sharedState_dict);
-  auto localState_dict = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx_dict;
-  reader_dict->read(localState_dict, ctx_dict);
+  execution::Context ctx_dict = readToContext(reader_dict, sharedState_dict);
   EXPECT_EQ(ctx_dict.row_num(), num_rows);
   
   auto sharedState_nodict = createSharedState(
@@ -1360,9 +1339,7 @@ TEST_F(ParquetTest, TestParquetExportWithDictionaryEncoding) {
       {{"batch_read", "false"}});
   
   auto reader_nodict = createParquetReader(sharedState_nodict);
-  auto localState_nodict = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx_nodict;
-  reader_nodict->read(localState_nodict, ctx_nodict);
+  execution::Context ctx_nodict = readToContext(reader_nodict, sharedState_nodict);
   EXPECT_EQ(ctx_nodict.row_num(), num_rows);
 }
 
@@ -1430,9 +1407,7 @@ TEST_F(ParquetTest, TestParquetExportWithDateAndTimestamp) {
       {{"batch_read", "false"}});
   
   auto reader = createParquetReader(sharedState);
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
   EXPECT_EQ(ctx.row_num(), num_rows);
 }
 
@@ -1806,10 +1781,7 @@ TEST_F(ParquetTest, TestParquetNonExistentColumnThrows) {
       {{"batch_read", "false"}});
   auto reader = createParquetReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  EXPECT_THROW(reader->read(localState, ctx),
+  EXPECT_THROW(readToContext(reader, sharedState),
                exception::SchemaMismatchException);
 }
 

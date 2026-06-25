@@ -34,10 +34,7 @@ TEST_F(ReaderTest, TestBasicCsvRead) {
                         {{"skip_rows", "1"}, {"batch_read", "false"}});
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Verify data: should have 3 columns
   EXPECT_EQ(ctx.col_num(), 3);
@@ -59,10 +56,7 @@ TEST_F(ReaderTest, TestCsvWithTabDelimiter) {
 
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   EXPECT_EQ(ctx.col_num(), 3);
   EXPECT_EQ(ctx.row_num(), 2);
@@ -84,10 +78,7 @@ TEST_F(ReaderTest, TestCsvWithCustomQuoting) {
                                         {"batch_read", "false"}});
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   EXPECT_EQ(ctx.col_num(), 3);
   EXPECT_EQ(ctx.row_num(), 2);
@@ -105,10 +96,7 @@ TEST_F(ReaderTest, TestCsvWithNoHeader) {
                                        {{"batch_read", "false"}});
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   EXPECT_EQ(ctx.col_num(), 3);
   EXPECT_EQ(ctx.row_num(), 2);
@@ -133,18 +121,21 @@ TEST_F(ReaderTest, TestBatchRead) {
       {{"batch_read", "true"}, {"batch_size", "1024"}, {"skip_rows", "1"}});
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
+  // In the new streaming architecture, batch_read returns a supplier
+  // that streams chunks on-demand rather than materializing all at once.
+  auto supplier = reader->read();
+  ASSERT_NE(supplier, nullptr);
 
-  reader->read(localState, ctx);
+  // Verify total row count via supplier
+  EXPECT_EQ(supplier->RowNum(), 100);  // All 100 rows should be readable
 
-  // Batch mode: data is materialized into Context chunks
-  EXPECT_GT(ctx.chunk_num(), 0);
-  EXPECT_EQ(ctx.col_num(), 3);
-
-  // Count rows using helper function
-  int64_t totalRows = count_batch_row_num(ctx);
-  EXPECT_EQ(totalRows, 100);  // All 100 rows should be read
+  // Verify actual data iteration
+  int64_t totalRows = 0;
+  while (auto chunk = supplier->GetNextChunk()) {
+    EXPECT_EQ(chunk->col_num(), 3);
+    totalRows += static_cast<int64_t>(chunk->row_num());
+  }
+  EXPECT_EQ(totalRows, 100);
 }
 
 // Test 6: Column pruning (skip columns)
@@ -164,10 +155,7 @@ TEST_F(ReaderTest, TestColumnPruning) {
 
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Should only have 2 columns (id and score)
   EXPECT_EQ(ctx.col_num(), 2);
@@ -194,10 +182,7 @@ TEST_F(ReaderTest, TestFilterPushdown) {
 
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Should filter out rows with score <= 90.0
   // Expected: Alice (95.5) and Charlie (92.5) - 2 rows
@@ -227,10 +212,7 @@ TEST_F(ReaderTest, TestColumnPruningAndFilterPushdown) {
 
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Should have 2 columns (id, score) and filtered rows (score > 90.0)
   EXPECT_EQ(ctx.col_num(), 2);
@@ -256,10 +238,7 @@ TEST_F(ReaderTest, TestMultipleFiles) {
 
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Should read all rows from both files (4 rows total)
   EXPECT_EQ(ctx.col_num(), 3);
@@ -282,10 +261,7 @@ TEST_F(ReaderTest, TestForceColumnTypeConversion) {
                         {{"skip_rows", "1"}, {"batch_read", "false"}});
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   EXPECT_EQ(ctx.col_num(), 3);
   EXPECT_EQ(ctx.row_num(), 3);
@@ -326,10 +302,7 @@ TEST_F(ReaderTest, TestMultiColumnAndFilterPushdown) {
 
   auto reader = createArrowReader(sharedState);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   // Should have 3 columns
   EXPECT_EQ(ctx.col_num(), 3);
@@ -354,10 +327,7 @@ TEST_F(ReaderTest, TestBasicJsonRead) {
                             {{"batch_read", "false"}});
   auto reader = createJsonReader(sharedState, false);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  reader->read(localState, ctx);
+  execution::Context ctx = readToContext(reader, sharedState);
 
   EXPECT_EQ(ctx.col_num(), 3);
   EXPECT_EQ(ctx.row_num(), 2);
@@ -376,10 +346,7 @@ TEST_F(ReaderTest, TestJsonNonExistentColumnThrows) {
                             {{"batch_read", "false"}});
   auto reader = createJsonReader(sharedState, false);
 
-  auto localState = std::make_shared<reader::ReadLocalState>();
-  execution::Context ctx;
-
-  EXPECT_THROW(reader->read(localState, ctx),
+  EXPECT_THROW(readToContext(reader, sharedState),
                exception::SchemaMismatchException);
 }
 

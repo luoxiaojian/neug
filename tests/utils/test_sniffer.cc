@@ -32,7 +32,7 @@ TEST_F(SnifferTest, TestSniffBasic) {
   auto sharedState = createSharedState("test_sniff.csv", {}, {});
 
   auto reader = createCsvReader(sharedState);
-  auto sniffer = reader::CsvSniffer(reader);
+  auto sniffer = reader::ReaderSniffer(reader);
   auto schema = sniffer.sniff().value();
 
   EXPECT_EQ(schema->type(), reader::EntrySchemaType::TABLE);

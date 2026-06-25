@@ -32,6 +32,7 @@
 #include "neug/generated/proto/plan/basic_type.pb.h"
 #include "neug/generated/proto/plan/expr.pb.h"
 #include "neug/utils/io/read/common/options.h"
+#include "neug/utils/io/read/common/reader_utils.h"
 #include "neug/utils/io/reader.h"
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/io/read/common/type_converter.h"
@@ -245,7 +246,15 @@ class ReaderTest : public ::testing::Test {
     return sharedState;
   }
 
-  std::shared_ptr<reader::CsvReader> createCsvReader(
+  execution::Context readToContext(
+      const std::shared_ptr<reader::FileReader>& reader,
+      const std::shared_ptr<reader::ReadSharedState>& sharedState,
+      size_t fallback_column_count = 0) {
+    return reader::toContext(reader->read(), *sharedState,
+                             fallback_column_count);
+  }
+
+  std::shared_ptr<reader::FileReader> createCsvReader(
       const std::shared_ptr<reader::ReadSharedState>& sharedState) {
     auto optionsBuilder =
         std::make_unique<reader::CsvOptionsBuilder>(sharedState);
@@ -253,7 +262,7 @@ class ReaderTest : public ::testing::Test {
                                                std::move(optionsBuilder));
   }
 
-  std::shared_ptr<reader::CsvReader> createArrowReader(
+  std::shared_ptr<reader::FileReader> createArrowReader(
       const std::shared_ptr<reader::ReadSharedState>& sharedState) {
     return createCsvReader(sharedState);
   }
@@ -287,7 +296,7 @@ class ReaderTest : public ::testing::Test {
     return sharedState;
   }
 
-  std::shared_ptr<reader::JsonReader> createJsonReader(
+  std::shared_ptr<reader::FileReader> createJsonReader(
       const std::shared_ptr<reader::ReadSharedState>& sharedState,
       bool json_array_input = true) {
     auto optionsBuilder = std::make_unique<reader::JsonOptionsBuilder>(

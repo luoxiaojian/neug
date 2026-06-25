@@ -92,6 +92,62 @@ class CSVChunkSupplier : public IDataChunkSupplier {
 using CSVStreamChunkSupplier = CSVChunkSupplier;
 using CSVTableChunkSupplier = CSVChunkSupplier;
 
+/// Yields pre-materialized DataChunks one by one.
+class MultiDataChunkSupplier : public IDataChunkSupplier {
+ public:
+  explicit MultiDataChunkSupplier(
+      std::vector<std::shared_ptr<execution::DataChunk>> chunks)
+      : chunks_(std::move(chunks)), index_(0) {}
+
+  std::shared_ptr<execution::DataChunk> GetNextChunk() override {
+    if (index_ >= chunks_.size()) return nullptr;
+    return chunks_[index_++];
+  }
+
+  int64_t RowNum() const override {
+    int64_t total = 0;
+    for (const auto& chunk : chunks_) {
+      total += static_cast<int64_t>(chunk->row_num());
+    }
+    return total;
+  }
+
+ private:
+  std::vector<std::shared_ptr<execution::DataChunk>> chunks_;
+  size_t index_;
+};
+
+/// Wraps multiple IDataChunkSupplier instances into a single sequential stream.
+class ChunkSupplierWrapper : public IDataChunkSupplier {
+ public:
+  explicit ChunkSupplierWrapper(
+      std::vector<std::shared_ptr<IDataChunkSupplier>> suppliers)
+      : suppliers_(std::move(suppliers)) {}
+
+  std::shared_ptr<execution::DataChunk> GetNextChunk() override {
+    while (current_supplier_index_ < suppliers_.size()) {
+      auto chunk = suppliers_[current_supplier_index_]->GetNextChunk();
+      if (chunk) {
+        return chunk;
+      }
+      current_supplier_index_++;
+    }
+    return nullptr;
+  }
+
+  int64_t RowNum() const override {
+    int64_t total_rows = 0;
+    for (const auto& supplier : suppliers_) {
+      total_rows += supplier->RowNum();
+    }
+    return total_rows;
+  }
+
+ private:
+  std::vector<std::shared_ptr<IDataChunkSupplier>> suppliers_;
+  size_t current_supplier_index_ = 0;
+};
+
 void fillVertexReaderMeta(label_t v_label, const std::string& v_label_name,
                           const std::string& v_file,
                           const LoadingConfig& loading_config,

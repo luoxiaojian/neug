@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-#include "neug/utils/io/reader.h"
+#include "neug/utils/io/read/csv/csv_reader.h"
 
 #include "neug/execution/common/columns/container_types.h"
 
@@ -341,8 +341,7 @@ CsvReader::CsvReader(std::shared_ptr<ReadSharedState> sharedState,
 
 CsvReader::~CsvReader() = default;
 
-void CsvReader::read(std::shared_ptr<ReadLocalState> /*localState*/,
-                     execution::Context& ctx) {
+std::shared_ptr<IDataChunkSupplier> CsvReader::read() {
   if (!sharedState_) {
     THROW_INVALID_ARGUMENT_EXCEPTION("SharedState is null");
   }
@@ -360,19 +359,8 @@ void CsvReader::read(std::shared_ptr<ReadLocalState> /*localState*/,
   const bool use_batch_read = readOpts.batch_read.get(fileSchema.options);
 
   auto read_config = read_config_for_supplier(config);
-  if (sharedState_->skipRows) {
-    // Need all columns to evaluate row-filter expression;
-    // full_read will project afterwards.
+  if (sharedState_->skipRows || !sharedState_->projectColumns.empty()) {
     read_config.include_columns = config.column_names;
-  } else if (!sharedState_->projectColumns.empty()) {
-    if (use_batch_read) {
-      // batch_read streams chunks directly to the consumer without
-      // post-projection, so push column projection down to the supplier.
-      read_config.include_columns = config.include_columns;
-    } else {
-      // full_read handles projection via project_chunk().
-      read_config.include_columns = config.column_names;
-    }
   }
 
   const auto& paths = fileSchema.paths;
@@ -387,15 +375,14 @@ void CsvReader::read(std::shared_ptr<ReadLocalState> /*localState*/,
   }
 
   if (use_batch_read) {
-    batch_read(suppliers, ctx);
-  } else {
-    full_read(suppliers, ctx, config);
+    return batch_read(suppliers);
   }
+  return full_read(suppliers, config);
 }
 
-void CsvReader::full_read(
+std::shared_ptr<IDataChunkSupplier> CsvReader::full_read(
     const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers,
-    execution::Context& output, const CsvReadConfig& output_config) {
+    const CsvReadConfig& output_config) {
   auto merged = read_all_chunks(suppliers);
 
   int expected_cols = sharedState_->columnNum();
@@ -404,30 +391,28 @@ void CsvReader::full_read(
       sharedState_->projectColumns.empty()) {
     THROW_IO_EXCEPTION(
         "Column number mismatch between schema and CSV data, schema: " +
-        std::to_string(expected_cols) +
-        ", data: " + std::to_string(merged.col_num()));
+        std::to_string(expected_cols) + ", data: " +
+        std::to_string(merged.col_num()));
   }
 
-  auto filtered =
-      filter_chunk(merged, sharedState_->skipRows, output_config.column_names);
+  auto filtered = filter_chunk(merged, sharedState_->skipRows,
+                               output_config.column_names);
   auto projected = project_chunk(filtered, output_config.column_names,
                                  sharedState_->projectColumns.empty()
                                      ? output_config.include_columns
                                      : sharedState_->projectColumns);
 
-  output.clear();
-  output.append_chunk(std::move(projected));
+  return std::make_shared<MultiDataChunkSupplier>(
+      std::vector<std::shared_ptr<execution::DataChunk>>{
+          std::make_shared<execution::DataChunk>(std::move(projected))});
 }
 
-void CsvReader::batch_read(
-    const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers,
-    execution::Context& output) {
-  output.clear();
-  for (const auto& supplier : suppliers) {
-    while (auto chunk = supplier->GetNextChunk()) {
-      output.append_chunk(std::move(*chunk));
-    }
+std::shared_ptr<IDataChunkSupplier> CsvReader::batch_read(
+    const std::vector<std::shared_ptr<IDataChunkSupplier>>& suppliers) {
+  if (suppliers.size() == 1) {
+    return suppliers.front();
   }
+  return std::make_shared<ChunkSupplierWrapper>(suppliers);
 }
 
 result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
