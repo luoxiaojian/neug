@@ -34,7 +34,9 @@
 #include "neug/utils/io/read/common/reader_utils.h"
 #include "neug/utils/io/reader.h"
 #include "neug/utils/io/read/common/schema.h"
+#include "neug/utils/io/vfs/file_system.h"
 
+#include "../../extension/parquet/include/parquet/arrow_reader.h"
 #include "../../extension/parquet/include/parquet_options.h"
 #include "../../extension/parquet/include/parquet_export_function.h"
 #include "neug/generated/proto/response/response.pb.h"
@@ -197,11 +199,12 @@ class ParquetTest : public ::testing::Test {
 
   std::shared_ptr<reader::ArrowReader> createParquetReader(
       const std::shared_ptr<reader::ReadSharedState>& sharedState) {
-    auto fileSystem = std::make_shared<arrow::fs::LocalFileSystem>();
+    fsys::FileSystemRegistry registry;
+    auto fs = registry.Provide(sharedState->schema.file);
     auto optionsBuilder =
-        std::make_unique<reader::ArrowParquetOptionsBuilder>(sharedState);
+        std::make_unique<reader::ParquetOptionsBuilder>(sharedState);
     return std::make_shared<reader::ArrowReader>(
-        sharedState, std::move(optionsBuilder), std::move(fileSystem));
+        sharedState, std::move(optionsBuilder), std::move(fs));
   }
 };
 
@@ -210,7 +213,7 @@ class ParquetTest : public ::testing::Test {
 // Verify that Neug options are correctly translated to Arrow Parquet configuration
 // =============================================================================
 
-TEST_F(ParquetTest, TestOptionsBuilder_BuildsValidParquetFragmentScanOptions) {
+TEST_F(ParquetTest, TestOptionsBuilder_BuildsValidParquetReadOptions) {
   createSimpleParquetFile("test_options.parquet");
   
   auto sharedState = createSharedState(
@@ -219,22 +222,12 @@ TEST_F(ParquetTest, TestOptionsBuilder_BuildsValidParquetFragmentScanOptions) {
       {createInt64Type(), createStringType(), createDoubleType()},
       {});
   
-  reader::ArrowParquetOptionsBuilder optionsBuilder(sharedState);
+  reader::ParquetOptionsBuilder optionsBuilder(sharedState);
   auto options = optionsBuilder.build();
   
-  // Verify the builder creates ParquetFragmentScanOptions (not generic FragmentScanOptions)
-  ASSERT_NE(options.scanOptions, nullptr);
-  ASSERT_NE(options.scanOptions->fragment_scan_options, nullptr);
-  
-  auto parquetFragmentOpts = std::dynamic_pointer_cast<arrow::dataset::ParquetFragmentScanOptions>(
-      options.scanOptions->fragment_scan_options);
-  ASSERT_NE(parquetFragmentOpts, nullptr) 
-      << "Extension should create ParquetFragmentScanOptions, not generic FragmentScanOptions";
-  
-  // Verify reader_properties and arrow_reader_properties are initialized
-  EXPECT_NE(parquetFragmentOpts->reader_properties, nullptr)
+  EXPECT_NE(options.reader_properties, nullptr)
       << "Extension should initialize reader_properties";
-  EXPECT_NE(parquetFragmentOpts->arrow_reader_properties, nullptr)
+  EXPECT_NE(options.arrow_reader_properties, nullptr)
       << "Extension should initialize arrow_reader_properties";
 }
 
@@ -249,16 +242,12 @@ TEST_F(ParquetTest, TestOptionsTranslation_BufferSize) {
       {createInt64Type(), createStringType(), createDoubleType()},
       {{"batch_size", std::to_string(custom_buffer_size)}});
   
-  reader::ArrowParquetOptionsBuilder optionsBuilder(sharedState);
+  reader::ParquetOptionsBuilder optionsBuilder(sharedState);
   auto options = optionsBuilder.build();
   
-  auto parquetFragmentOpts = std::dynamic_pointer_cast<arrow::dataset::ParquetFragmentScanOptions>(
-      options.scanOptions->fragment_scan_options);
-  ASSERT_NE(parquetFragmentOpts, nullptr);
-  ASSERT_NE(parquetFragmentOpts->reader_properties, nullptr);
+  ASSERT_NE(options.reader_properties, nullptr);
   
-  // Verify the Neug batch_size option is correctly translated to Arrow buffer_size
-  EXPECT_EQ(parquetFragmentOpts->reader_properties->buffer_size(), custom_buffer_size)
+  EXPECT_EQ(options.reader_properties->buffer_size(), custom_buffer_size)
       << "Extension should translate batch_size option to Arrow buffer_size";
 }
 
@@ -273,16 +262,12 @@ TEST_F(ParquetTest, TestOptionsTranslation_ParquetBatchRows) {
       {createInt64Type(), createStringType(), createDoubleType()},
       {{"PARQUET_BATCH_ROWS", std::to_string(custom_batch_rows)}});
   
-  reader::ArrowParquetOptionsBuilder optionsBuilder(sharedState);
+  reader::ParquetOptionsBuilder optionsBuilder(sharedState);
   auto options = optionsBuilder.build();
   
-  auto parquetFragmentOpts = std::dynamic_pointer_cast<arrow::dataset::ParquetFragmentScanOptions>(
-      options.scanOptions->fragment_scan_options);
-  ASSERT_NE(parquetFragmentOpts, nullptr);
-  ASSERT_NE(parquetFragmentOpts->arrow_reader_properties, nullptr);
+  ASSERT_NE(options.arrow_reader_properties, nullptr);
   
-  // Verify PARQUET_BATCH_ROWS is translated to Arrow batch_size
-  EXPECT_EQ(parquetFragmentOpts->arrow_reader_properties->batch_size(), custom_batch_rows)
+  EXPECT_EQ(options.arrow_reader_properties->batch_size(), custom_batch_rows)
       << "Extension should translate PARQUET_BATCH_ROWS to Arrow batch_size";
 }
 
@@ -296,16 +281,12 @@ TEST_F(ParquetTest, TestOptionsTranslation_PreBuffer) {
       {createInt64Type(), createStringType(), createDoubleType()},
       {{"PRE_BUFFER", "true"}});
   
-  reader::ArrowParquetOptionsBuilder optionsBuilder(sharedState);
+  reader::ParquetOptionsBuilder optionsBuilder(sharedState);
   auto options = optionsBuilder.build();
   
-  auto parquetFragmentOpts = std::dynamic_pointer_cast<arrow::dataset::ParquetFragmentScanOptions>(
-      options.scanOptions->fragment_scan_options);
-  ASSERT_NE(parquetFragmentOpts, nullptr);
-  ASSERT_NE(parquetFragmentOpts->arrow_reader_properties, nullptr);
+  ASSERT_NE(options.arrow_reader_properties, nullptr);
   
-  // Verify PRE_BUFFER option is translated
-  EXPECT_TRUE(parquetFragmentOpts->arrow_reader_properties->pre_buffer())
+  EXPECT_TRUE(options.arrow_reader_properties->pre_buffer())
       << "Extension should translate PRE_BUFFER=true to Arrow pre_buffer setting";
 }
 
@@ -319,16 +300,12 @@ TEST_F(ParquetTest, TestOptionsTranslation_UseThreads) {
       {createInt64Type(), createStringType(), createDoubleType()},
       {{"parallel", "false"}});
   
-  reader::ArrowParquetOptionsBuilder optionsBuilder(sharedState);
+  reader::ParquetOptionsBuilder optionsBuilder(sharedState);
   auto options = optionsBuilder.build();
   
-  auto parquetFragmentOpts = std::dynamic_pointer_cast<arrow::dataset::ParquetFragmentScanOptions>(
-      options.scanOptions->fragment_scan_options);
-  ASSERT_NE(parquetFragmentOpts, nullptr);
-  ASSERT_NE(parquetFragmentOpts->arrow_reader_properties, nullptr);
+  ASSERT_NE(options.arrow_reader_properties, nullptr);
   
-  // Verify parallel option is translated to use_threads
-  EXPECT_FALSE(parquetFragmentOpts->arrow_reader_properties->use_threads())
+  EXPECT_FALSE(options.arrow_reader_properties->use_threads())
       << "Extension should translate parallel=false to use_threads=false";
 }
 
@@ -342,16 +319,12 @@ TEST_F(ParquetTest, TestOptionsTranslation_IoCoalescing) {
       {createInt64Type(), createStringType(), createDoubleType()},
       {{"ENABLE_IO_COALESCING", "true"}});
   
-  reader::ArrowParquetOptionsBuilder optionsBuilder1(sharedState1);
+  reader::ParquetOptionsBuilder optionsBuilder1(sharedState1);
   auto options1 = optionsBuilder1.build();
   
-  auto parquetFragmentOpts1 = std::dynamic_pointer_cast<arrow::dataset::ParquetFragmentScanOptions>(
-      options1.scanOptions->fragment_scan_options);
-  ASSERT_NE(parquetFragmentOpts1, nullptr);
-  ASSERT_NE(parquetFragmentOpts1->arrow_reader_properties, nullptr);
+  ASSERT_NE(options1.arrow_reader_properties, nullptr);
   
-  // Verify lazy coalescing is enabled when ENABLE_IO_COALESCING=true
-  auto cache_opts1 = parquetFragmentOpts1->arrow_reader_properties->cache_options();
+  auto cache_opts1 = options1.arrow_reader_properties->cache_options();
   EXPECT_TRUE(cache_opts1.lazy)
       << "Extension should use LazyDefaults (lazy=true) when ENABLE_IO_COALESCING=true";
   
@@ -362,14 +335,10 @@ TEST_F(ParquetTest, TestOptionsTranslation_IoCoalescing) {
       {createInt64Type(), createStringType(), createDoubleType()},
       {{"ENABLE_IO_COALESCING", "false"}});
   
-  reader::ArrowParquetOptionsBuilder optionsBuilder2(sharedState2);
+  reader::ParquetOptionsBuilder optionsBuilder2(sharedState2);
   auto options2 = optionsBuilder2.build();
   
-  auto parquetFragmentOpts2 = std::dynamic_pointer_cast<arrow::dataset::ParquetFragmentScanOptions>(
-      options2.scanOptions->fragment_scan_options);
-  ASSERT_NE(parquetFragmentOpts2, nullptr);
-  
-  auto cache_opts2 = parquetFragmentOpts2->arrow_reader_properties->cache_options();
+  auto cache_opts2 = options2.arrow_reader_properties->cache_options();
   EXPECT_FALSE(cache_opts2.lazy)
       << "Extension should use Defaults (lazy=false) when ENABLE_IO_COALESCING=false";
 }
@@ -384,29 +353,22 @@ TEST_F(ParquetTest, TestOptionsTranslation_DefaultValues) {
       {createInt64Type(), createStringType(), createDoubleType()},
       {});
   
-  reader::ArrowParquetOptionsBuilder optionsBuilder(sharedState);
+  reader::ParquetOptionsBuilder optionsBuilder(sharedState);
   auto options = optionsBuilder.build();
   
-  auto parquetFragmentOpts = std::dynamic_pointer_cast<arrow::dataset::ParquetFragmentScanOptions>(
-      options.scanOptions->fragment_scan_options);
-  ASSERT_NE(parquetFragmentOpts, nullptr);
-  ASSERT_NE(parquetFragmentOpts->arrow_reader_properties, nullptr);
+  ASSERT_NE(options.arrow_reader_properties, nullptr);
   
-  // Verify default values are applied
-  // Default PARQUET_BATCH_ROWS = 65536
-  EXPECT_EQ(parquetFragmentOpts->arrow_reader_properties->batch_size(), 65536)
+  EXPECT_EQ(options.arrow_reader_properties->batch_size(), 65536)
       << "Extension should use default PARQUET_BATCH_ROWS=65536";
   
-  // Default PRE_BUFFER = false
-  EXPECT_FALSE(parquetFragmentOpts->arrow_reader_properties->pre_buffer())
+  EXPECT_FALSE(options.arrow_reader_properties->pre_buffer())
       << "Extension should use default PRE_BUFFER=false";
   
-  // Default parallel/use_threads = true
-  EXPECT_TRUE(parquetFragmentOpts->arrow_reader_properties->use_threads())
+  EXPECT_TRUE(options.arrow_reader_properties->use_threads())
       << "Extension should use default parallel=true";
 }
 
-TEST_F(ParquetTest, TestFileFormatConfiguration_SharesFragmentOptions) {
+TEST_F(ParquetTest, TestFileFormatConfiguration_UsesParquetBatchRows) {
   createSimpleParquetFile("test_format.parquet");
   
   auto sharedState = createSharedState(
@@ -415,21 +377,11 @@ TEST_F(ParquetTest, TestFileFormatConfiguration_SharesFragmentOptions) {
       {createInt64Type(), createStringType(), createDoubleType()},
       {{"PARQUET_BATCH_ROWS", "2048"}});
   
-  reader::ArrowParquetOptionsBuilder optionsBuilder(sharedState);
+  reader::ParquetOptionsBuilder optionsBuilder(sharedState);
   auto options = optionsBuilder.build();
   
-  // Verify FileFormat is ParquetFileFormat
-  ASSERT_NE(options.fileFormat, nullptr);
-  auto parquetFileFormat = std::dynamic_pointer_cast<arrow::dataset::ParquetFileFormat>(
-      options.fileFormat);
-  ASSERT_NE(parquetFileFormat, nullptr)
-      << "Extension should create ParquetFileFormat";
-  
-  // Verify the FileFormat shares the same fragment_scan_options as ScanOptions
-  // This ensures consistency in configuration
-  EXPECT_EQ(parquetFileFormat->default_fragment_scan_options, 
-            options.scanOptions->fragment_scan_options)
-      << "Extension should set ParquetFileFormat's default_fragment_scan_options to match ScanOptions";
+  ASSERT_NE(options.arrow_reader_properties, nullptr);
+  EXPECT_EQ(options.arrow_reader_properties->batch_size(), 2048);
 }
 
 // =============================================================================
@@ -452,7 +404,7 @@ TEST_F(ParquetTest, TestTypeMapping_StringToLargeUtf8) {
   execution::Context ctx = readToContext(reader, sharedState);
 
   // Verify string column is converted to large_utf8
-  auto col1 = ctx.columns[1];
+  auto col1 = ctx.chunk(0).columns()[1];
   ASSERT_EQ(col1->column_type(), execution::ContextColumnType::kValue);
   EXPECT_EQ(col1->elem_type().id(), neug::DataTypeId::kVarchar);
 }
@@ -503,10 +455,10 @@ TEST_F(ParquetTest, TestTypeMapping_PreserveNumericTypes) {
   EXPECT_EQ(ctx.col_num(), 4);
   EXPECT_EQ(ctx.row_num(), 1);
 
-  EXPECT_EQ(ctx.columns[0]->elem_type().id(), neug::DataTypeId::kInt32);
-  EXPECT_EQ(ctx.columns[1]->elem_type().id(), neug::DataTypeId::kInt64);
-  EXPECT_EQ(ctx.columns[2]->elem_type().id(), neug::DataTypeId::kDouble);
-  EXPECT_EQ(ctx.columns[3]->elem_type().id(), neug::DataTypeId::kBoolean);
+  EXPECT_EQ(ctx.chunk(0).columns()[0]->elem_type().id(), neug::DataTypeId::kInt32);
+  EXPECT_EQ(ctx.chunk(0).columns()[1]->elem_type().id(), neug::DataTypeId::kInt64);
+  EXPECT_EQ(ctx.chunk(0).columns()[2]->elem_type().id(), neug::DataTypeId::kDouble);
+  EXPECT_EQ(ctx.chunk(0).columns()[3]->elem_type().id(), neug::DataTypeId::kBoolean);
 }
 
 // =============================================================================
@@ -651,17 +603,12 @@ TEST_F(ParquetTest, TestIntegration_FilterPushdown) {
       << "Extension should translate Neug's skipRows filter to Arrow filter pushdown. "
       << "Should filter to 3 rows with score > 90.0";
   
-  // Verify the filtered data
-  auto col1 = std::dynamic_pointer_cast<execution::ValueColumn>(ctx.columns[1]);
+  // Verify the filtered data (ValueColumn after decode)
+  auto col1 = std::dynamic_pointer_cast<execution::ValueColumn<double>>(ctx.chunk(0).columns()[1]);
   ASSERT_NE(col1, nullptr);
-  const auto& columns = col1->GetColumns();
-  ASSERT_FALSE(columns.empty());
-  auto scoreArray = std::static_pointer_cast<arrow::DoubleArray>(columns[0]);
-  
-  // All scores should be > 90.0
-  for (int64_t i = 0; i < scoreArray->length(); ++i) {
-    EXPECT_GT(scoreArray->Value(i), 90.0)
-        << "Extension's filter translation should result in all scores > 90.0";
+  for (size_t i = 0; i < col1->size(); ++i) {
+    EXPECT_GT(col1->get_value(i), 90.0)
+        << "Extension filter should result in all scores > 90.0";
   }
 }
 
@@ -694,7 +641,7 @@ TEST_F(ParquetTest, TestIntegration_BatchReadMode) {
   execution::Context ctx2 = readToContext(reader2, sharedState2);
 
   EXPECT_EQ(ctx2.col_num(), 3);
-  auto col0_2 = ctx2.columns[0];
+  auto col0_2 = ctx2.chunk(0).columns()[0];
   EXPECT_EQ(col0_2->column_type(), execution::ContextColumnType::kValue)
       << "Extension should use Value column type when batch_read=false";
 }

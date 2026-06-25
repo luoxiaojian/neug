@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * 	http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,52 +16,24 @@
 
 #pragma once
 
-#include <arrow/dataset/dataset.h>
-#include <arrow/dataset/file_base.h>
-#include <arrow/dataset/file_parquet.h>
-#include <memory>
-#include "parquet/arrow_options.h"
+#include <parquet/properties.h>
+
+#include "neug/utils/io/read/common/options.h"
 
 namespace neug {
 namespace reader {
 
-/**
- * @brief Parquet-specific parse options
- *
- * These options control Parquet file reading behavior:
- * - buffered_stream: Enable buffered I/O stream for better performance
- * (default: true)
- * - pre_buffer: Pre-buffer data for high-latency filesystems like S3 (default:
- * false)
- * - enable_io_coalescing: Enable Arrow I/O read coalescing (hole-filling cache)
- * for improved performance when reading non-contiguous ranges (default: true).
- *   When true, uses lazy coalescing (CacheOptions::LazyDefaults); when false,
- * uses eager coalescing (CacheOptions::Defaults).
- * - row_batch_size: Number of rows per Arrow batch when converting from Parquet
- * (default: 65536)
- *
- */
 struct ParquetParseOptions {
   Option<bool> buffered_stream =
       Option<bool>::BoolOption("BUFFERED_STREAM", true);
-  Option<bool> pre_buffer = Option<bool>::BoolOption("PRE_BUFFER", false);
+  Option<bool> pre_buffer =
+      Option<bool>::BoolOption("PRE_BUFFER", false);
   Option<bool> enable_io_coalescing =
       Option<bool>::BoolOption("ENABLE_IO_COALESCING", true);
   Option<int64_t> row_batch_size =
       Option<int64_t>::Int64Option("PARQUET_BATCH_ROWS", 65536);
 };
 
-/**
- * @brief Parquet export options
- *
- * These options control Parquet file writing behavior:
- * - COMPRESSION: Compression codec (default: snappy)
- *   Supported values: none, snappy, gzip (zlib), zstd
- * - ROW_GROUP_SIZE: Number of rows per row group (default: 1048576)
- * - DICTIONARY_ENCODING: Enable dictionary encoding (default: true)
- *   Valid values: true, false
- *
- */
 struct ParquetExportOptions {
   Option<std::string> compression =
       Option<std::string>::StringOption("COMPRESSION", "snappy");
@@ -71,50 +43,21 @@ struct ParquetExportOptions {
       Option<bool>::BoolOption("DICTIONARY_ENCODING", true);
 };
 
-/**
- * @brief Parquet-specific implementation of Arrow scan options builder
- *
- * This class extends ArrowOptionsBuilder to provide Parquet-specific
- * functionality:
- * - buildFragmentOptions(): Builds ParquetFragmentScanOptions with options
- *   for parallel reading, dictionary encoding, etc.
- * - buildFileFormat(): Builds ParquetFileFormat
- */
-class ArrowParquetOptionsBuilder : public ArrowOptionsBuilder {
+/// libparquet reader configuration (no Arrow Dataset).
+struct ParquetReadOptions {
+  std::shared_ptr<::parquet::ReaderProperties> reader_properties;
+  std::shared_ptr<::parquet::ArrowReaderProperties> arrow_reader_properties;
+};
+
+class ParquetOptionsBuilder {
  public:
-  /**
-   * @brief Constructs an ArrowParquetOptionsBuilder with the given shared state
-   * @param state The shared read state containing Parquet schema and
-   * configuration
-   */
-  explicit ArrowParquetOptionsBuilder(std::shared_ptr<ReadSharedState> state)
-      : ArrowOptionsBuilder(state){};
+  explicit ParquetOptionsBuilder(std::shared_ptr<ReadSharedState> state)
+      : state_(std::move(state)) {}
 
-  virtual ArrowOptions build() const override;
+  ParquetReadOptions build() const;
 
- protected:
-  /**
-   * @brief Builds Parquet-specific fragment scan options
-   *
-   * Creates ParquetFragmentScanOptions with:
-   * - Reader properties: parallel reading, dictionary encoding, etc.
-   *
-   * @return ParquetFragmentScanOptions instance
-   */
-  std::shared_ptr<arrow::dataset::FragmentScanOptions> buildFragmentOptions()
-      const;
-
-  /**
-   * @brief Builds ParquetFileFormat from scan options
-   *
-   * Extracts reader properties from the ParquetFragmentScanOptions
-   * and configures the ParquetFileFormat.
-   *
-   * @param options The scan options containing fragment_scan_options
-   * @return ParquetFileFormat instance configured with reader properties
-   */
-  std::shared_ptr<arrow::dataset::FileFormat> buildFileFormat(
-      const arrow::dataset::ScanOptions& options) const;
+ private:
+  std::shared_ptr<ReadSharedState> state_;
 };
 
 }  // namespace reader
