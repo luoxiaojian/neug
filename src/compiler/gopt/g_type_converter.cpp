@@ -164,6 +164,25 @@ std::unique_ptr<::common::IrDataType> GPhysicalTypeConverter::convertArrayType(
   return result;
 }
 
+std::unique_ptr<::common::IrDataType> GPhysicalTypeConverter::convertMapType(
+    const common::DataType& keyType,
+    const common::DataType& valueType) {
+  auto result = std::make_unique<::common::IrDataType>();
+  auto keyIr = convertLogicalType(keyType);
+  auto valueIr = convertLogicalType(valueType);
+  if (!keyIr || !valueIr || !keyIr->has_data_type() ||
+      !valueIr->has_data_type()) {
+    THROW_EXCEPTION_WITH_FILE_LINE(
+        "Failed to convert MAP key/value types: key=" + keyType.ToString() +
+        ", value=" + valueType.ToString());
+  }
+  auto mapType = std::make_unique<::common::Map>();
+  mapType->set_allocated_key_type(keyIr->release_data_type());
+  mapType->set_allocated_value_type(valueIr->release_data_type());
+  result->mutable_data_type()->set_allocated_map(mapType.release());
+  return result;
+}
+
 GNodeType* convertGNodeType(const neug::DataType& type) {
   auto extraTypeInfo = type.getExtraTypeInfo();
   if (!extraTypeInfo) {
@@ -274,6 +293,11 @@ GPhysicalTypeConverter::convertLogicalType(const neug::DataType& type) {
     VLOG(1) << "Converting LIST type: " << type.ToString();
     auto& child_type = common::ListType::GetChildType(type);
     return convertArrayType(child_type);
+  }
+  case common::DataTypeId::kMap: {
+    return convertMapType(common::MapType::GetKeyType(type),
+                          common::MapType::GetValueType(type));
+    break;
   }
   case common::DataTypeId::kStruct: {
     return convertStructType(type);

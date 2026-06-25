@@ -139,6 +139,10 @@ class TypedColumn : public ColumnBase {
       return;
     }
     // allow resize is ignored for fixed-length types
+    if (value.IsNull()) {
+      set_value(index, T{});
+      return;
+    }
     set_value(index, value.GetValue<T>());
   }
 
