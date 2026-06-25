@@ -16,6 +16,7 @@
 
 #include "neug/utils/io/vfs/file_system.h"
 
+#include <istream>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -48,7 +49,26 @@ class LocalFileSystem : public FileSystem {
   }
 
   std::shared_ptr<void> getArrowFileSystem() const override { return nullptr; }
+
+  std::unique_ptr<io::RandomAccessFile> openInputFile(
+      const std::string& path) override {
+    return io::openLocalInputFile(path);
+  }
 };
+
+std::unique_ptr<io::RandomAccessFile> FileSystem::openInputFile(
+    const std::string& path) {
+  return io::openLocalInputFile(path);
+}
+
+std::unique_ptr<std::istream> openInputAsIstream(FileSystem& fs,
+                                                 const std::string& path) {
+  auto file = fs.openInputFile(path);
+  if (!file) {
+    THROW_IO_EXCEPTION("Failed to open input file: " + path);
+  }
+  return io::randomAccessToIstream(std::move(file));
+}
 
 FileSystemRegistry::FileSystemRegistry() {
   Register("file", [](const reader::FileSchema&) {

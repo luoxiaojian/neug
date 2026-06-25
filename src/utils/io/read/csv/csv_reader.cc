@@ -41,6 +41,7 @@
 #include "neug/utils/io/read/common/options.h"
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/io/read/common/type_converter.h"
+#include "neug/utils/io/vfs/file_system.h"
 #include "neug/utils/result.h"
 
 namespace neug {
@@ -93,8 +94,7 @@ bool compare_values(const ::common::Logical& logical,
   case ::common::Logical::NOT:
     return !left.GetValue<bool>();
   default:
-    THROW_NOT_IMPLEMENTED_EXCEPTION(
-        "Unsupported logical operator in CSV filter");
+    THROW_NOT_IMPLEMENTED_EXCEPTION("Unsupported logical operator in CSV filter");
   }
 }
 
@@ -133,12 +133,11 @@ class CsvRowFilter {
         }
         auto operand = value_stack.top();
         value_stack.pop();
-        value_stack.push(
-            [operand](const execution::DataChunk& chunk, size_t row) {
-              return execution::Value::BOOLEAN(
-                  compare_values(::common::Logical::NOT, operand(chunk, row),
-                                 execution::Value::BOOLEAN(false)));
-            });
+        value_stack.push([operand](const execution::DataChunk& chunk, size_t row) {
+          return execution::Value::BOOLEAN(
+              compare_values(::common::Logical::NOT, operand(chunk, row),
+                             execution::Value::BOOLEAN(false)));
+        });
         return;
       }
       if (value_stack.size() < 2) {
@@ -154,14 +153,12 @@ class CsvRowFilter {
                            const execution::DataChunk& chunk, size_t row) {
         auto left_val = left_fn(chunk, row);
         auto right_val = right_fn(chunk, row);
-        if (logical == ::common::Logical::AND ||
-            logical == ::common::Logical::OR) {
-          return execution::Value::BOOLEAN(compare_values(
-              logical, execution::Value::BOOLEAN(left_val.GetValue<bool>()),
-              execution::Value::BOOLEAN(right_val.GetValue<bool>())));
+        if (logical == ::common::Logical::AND || logical == ::common::Logical::OR) {
+          return execution::Value::BOOLEAN(
+              compare_values(logical, execution::Value::BOOLEAN(left_val.GetValue<bool>()),
+                             execution::Value::BOOLEAN(right_val.GetValue<bool>())));
         }
-        return execution::Value::BOOLEAN(
-            compare_values(logical, left_val, right_val));
+        return execution::Value::BOOLEAN(compare_values(logical, left_val, right_val));
       });
     };
 
@@ -170,8 +167,7 @@ class CsvRowFilter {
       switch (opr.item_case()) {
       case ::common::ExprOpr::kConst: {
         auto value = proto_value_to_execution(opr.const_());
-        value_stack.push(
-            [value](const execution::DataChunk&, size_t) { return value; });
+        value_stack.push([value](const execution::DataChunk&, size_t) { return value; });
         break;
       }
       case ::common::ExprOpr::kVar: {
@@ -182,15 +178,14 @@ class CsvRowFilter {
                                            column_name);
         }
         int col_idx = iter->second;
-        value_stack.push(
-            [col_idx](const execution::DataChunk& chunk, size_t row) {
-              auto col = chunk.get(col_idx);
-              if (!col) {
-                THROW_RUNTIME_ERROR("Missing filter column at index " +
-                                    std::to_string(col_idx));
-              }
-              return col->get_elem(row);
-            });
+        value_stack.push([col_idx](const execution::DataChunk& chunk, size_t row) {
+          auto col = chunk.get(col_idx);
+          if (!col) {
+            THROW_RUNTIME_ERROR("Missing filter column at index " +
+                                std::to_string(col_idx));
+          }
+          return col->get_elem(row);
+        });
         break;
       }
       case ::common::ExprOpr::kBrace: {
@@ -203,8 +198,7 @@ class CsvRowFilter {
             op_stack.pop();
           }
           if (op_stack.empty()) {
-            THROW_INVALID_ARGUMENT_EXCEPTION(
-                "Mismatched parentheses in filter");
+            THROW_INVALID_ARGUMENT_EXCEPTION("Mismatched parentheses in filter");
           }
           op_stack.pop();
         }
@@ -303,10 +297,9 @@ execution::DataChunk filter_chunk(
   return filtered;
 }
 
-execution::DataChunk project_chunk(
-    const execution::DataChunk& input,
-    const std::vector<std::string>& column_names,
-    const std::vector<std::string>& project_columns) {
+execution::DataChunk project_chunk(const execution::DataChunk& input,
+                                   const std::vector<std::string>& column_names,
+                                   const std::vector<std::string>& project_columns) {
   if (project_columns.empty()) {
     return input;
   }
@@ -335,9 +328,11 @@ CsvReadConfig read_config_for_supplier(const CsvReadConfig& config) {
 }  // namespace
 
 CsvReader::CsvReader(std::shared_ptr<ReadSharedState> sharedState,
-                     std::unique_ptr<CsvOptionsBuilder> optionsBuilder)
+                     std::unique_ptr<CsvOptionsBuilder> optionsBuilder,
+                     std::unique_ptr<fsys::FileSystem> fileSystem)
     : sharedState_(std::move(sharedState)),
-      optionsBuilder_(std::move(optionsBuilder)) {}
+      optionsBuilder_(std::move(optionsBuilder)),
+      fileSystem_(std::move(fileSystem)) {}
 
 CsvReader::~CsvReader() = default;
 
@@ -370,8 +365,10 @@ std::shared_ptr<IDataChunkSupplier> CsvReader::read() {
 
   std::vector<std::shared_ptr<IDataChunkSupplier>> suppliers;
   suppliers.reserve(paths.size());
+  fsys::FileSystem* fs = fileSystem_.get();
   for (const auto& path : paths) {
-    suppliers.push_back(std::make_shared<CSVChunkSupplier>(path, read_config));
+    suppliers.push_back(
+        std::make_shared<CSVChunkSupplier>(fs, path, read_config));
   }
 
   if (use_batch_read) {
@@ -434,18 +431,24 @@ result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
 
   ReadOptions readOpts;
   const bool autogenerate =
-      readOpts.autogenerate_column_names.get(sharedState_->schema.file.options);
+      readOpts.autogenerate_column_names.get(
+          sharedState_->schema.file.options);
 
   if (config.column_names.empty() && !autogenerate) {
-    config.column_names = read_header(paths[0], config);
+    config.column_names =
+        read_header(fileSystem_.get(), paths[0], config);
   } else if (config.column_names.empty() && autogenerate) {
-    std::ifstream input(paths[0]);
+    if (!fileSystem_) {
+      RETURN_STATUS_ERROR(neug::StatusCode::ERR_INVALID_ARGUMENT,
+                          "FileSystem is null");
+    }
+    auto input = fsys::openInputAsIstream(*fileSystem_, paths[0]);
     if (!input) {
       RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,
                           "Failed to open CSV file for schema inference");
     }
     std::string line;
-    if (!std::getline(input, line)) {
+    if (!std::getline(*input, line)) {
       RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,
                           "Failed to read first row for schema inference");
     }
@@ -477,7 +480,8 @@ result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
     sniff_config.column_types[name] = DataType(DataTypeId::kVarchar);
   }
 
-  auto supplier = std::make_shared<CSVChunkSupplier>(paths[0], sniff_config);
+  auto supplier = std::make_shared<CSVChunkSupplier>(fileSystem_.get(),
+                                                     paths[0], sniff_config);
   auto sample_chunk = supplier->GetNextChunk();
   if (!sample_chunk) {
     RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,
@@ -488,18 +492,25 @@ result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
   entrySchema->columnNames = config.column_names;
   entrySchema->columnTypes.reserve(config.column_names.size());
 
-  // Helper lambdas for type detection.
-  auto is_bool_token = [](const std::string& s) -> bool {
-    if (s.size() < 4 || s.size() > 5)
-      return false;
-    std::string lower;
-    lower.reserve(s.size());
-    for (char c : s)
-      lower.push_back(static_cast<char>(std::tolower(c)));
-    return lower == "true" || lower == "false";
+  const auto& col_names = config.column_names;
+  const size_t num_cols = col_names.size();
+  // Track per-column type flags.
+  std::vector<bool> all_int(num_cols, true);
+  std::vector<bool> all_double(num_cols, true);
+  std::vector<bool> all_bool(num_cols, true);
+  std::vector<bool> all_datetime(num_cols, true);
+  std::vector<bool> all_date(num_cols, true);
+  std::vector<bool> all_date_or_datetime(num_cols, true);
+  std::vector<bool> any_datetime(num_cols, false);
+  std::vector<bool> all_interval(num_cols, true);
+  std::vector<bool> has_value(num_cols, false);
+
+  // Helper lambdas for temporal/boolean detection.
+  auto is_bool_str = [](const std::string& s) -> bool {
+    return s == "true" || s == "false" || s == "TRUE" || s == "FALSE" ||
+           s == "True" || s == "False" || s == "1" || s == "0";
   };
-  auto is_date_token = [](const std::string& s) -> bool {
-    // YYYY-MM-DD (exactly 10 chars)
+  auto is_date_str = [](const std::string& s) -> bool {
     if (s.size() != 10)
       return false;
     if (s[4] != '-' || s[7] != '-')
@@ -510,8 +521,7 @@ result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
     }
     return true;
   };
-  auto is_datetime_token = [](const std::string& s) -> bool {
-    // YYYY-MM-DD HH:MM:SS (19 chars) or with fractional seconds
+  auto is_datetime_str = [](const std::string& s) -> bool {
     if (s.size() < 19)
       return false;
     if (s[4] != '-' || s[7] != '-')
@@ -526,8 +536,7 @@ result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
     }
     return true;
   };
-  auto is_interval_token = [](const std::string& s) -> bool {
-    // Simple heuristic: contains "year" or "month" or "day" or "hour"
+  auto is_interval_str = [](const std::string& s) -> bool {
     std::string lower;
     lower.reserve(s.size());
     for (char c : s)
@@ -538,79 +547,67 @@ result<std::shared_ptr<EntrySchema>> CsvReader::inferSchema() {
            lower.find("hour") != std::string::npos;
   };
 
-  NeuGTypeConverter converter;
-  for (size_t col = 0; col < config.column_names.size(); ++col) {
-    bool all_int = true;
-    bool all_double = true;
-    bool all_bool = true;
-    bool all_date = true;
-    bool all_datetime = true;
-    bool all_date_or_datetime = true;
-    bool any_datetime = false;
-    bool all_interval = true;
-    bool has_value = false;
-    for (size_t row = 0; row < sample_chunk->row_num(); ++row) {
+  for (size_t row = 0; row < sample_chunk->row_num(); ++row) {
+    for (size_t col = 0; col < num_cols; ++col) {
       auto value = sample_chunk->get(static_cast<int>(col))->get_elem(row);
       if (value.IsNull()) {
         continue;
       }
-      has_value = true;
       const std::string& token = value.GetValue<std::string>();
       if (token.empty()) {
-        all_int = false;
-        all_double = false;
-        all_bool = false;
-        all_date = false;
-        all_datetime = false;
-        all_date_or_datetime = false;
-        all_interval = false;
         continue;
       }
+      has_value[col] = true;
       // Integer check (must fit in int64_t)
       char* end = nullptr;
       errno = 0;
       std::strtoll(token.c_str(), &end, 10);
       if (end != token.c_str() + token.size() || errno == ERANGE) {
-        all_int = false;
+        all_int[col] = false;
       }
       // Double check
       end = nullptr;
       std::strtod(token.c_str(), &end);
       if (end != token.c_str() + token.size()) {
-        all_double = false;
+        all_double[col] = false;
       }
       // Bool check
-      if (!is_bool_token(token))
-        all_bool = false;
+      if (!is_bool_str(token)) {
+        all_bool[col] = false;
+      }
       // Temporal checks
-      bool is_dt = is_datetime_token(token);
-      bool is_d = is_date_token(token);
+      bool is_dt = is_datetime_str(token);
+      bool is_d = is_date_str(token);
       if (!is_dt)
-        all_datetime = false;
+        all_datetime[col] = false;
       if (!is_d)
-        all_date = false;
+        all_date[col] = false;
       if (!is_dt && !is_d)
-        all_date_or_datetime = false;
+        all_date_or_datetime[col] = false;
       if (is_dt)
-        any_datetime = true;
-      if (!is_interval_token(token))
-        all_interval = false;
+        any_datetime[col] = true;
+      if (!is_interval_str(token))
+        all_interval[col] = false;
     }
+  }
+
+  NeuGTypeConverter converter;
+  for (size_t col = 0; col < num_cols; ++col) {
     DataType inferred_type(DataTypeId::kVarchar);
-    if (has_value && all_int) {
+    if (has_value[col] && all_int[col]) {
       inferred_type = DataType(DataTypeId::kInt64);
-    } else if (has_value && all_double) {
+    } else if (has_value[col] && all_double[col]) {
       inferred_type = DataType(DataTypeId::kDouble);
-    } else if (has_value && all_bool) {
+    } else if (has_value[col] && all_bool[col]) {
       inferred_type = DataType(DataTypeId::kBoolean);
-    } else if (has_value && all_datetime) {
+    } else if (has_value[col] && all_datetime[col]) {
       inferred_type = DataType(DataTypeId::kTimestampMs);
-    } else if (has_value && all_date_or_datetime && any_datetime) {
-      // Mixed date/datetime values → infer as timestamp
+    } else if (has_value[col] && all_date_or_datetime[col] &&
+               any_datetime[col]) {
       inferred_type = DataType(DataTypeId::kTimestampMs);
-    } else if (has_value && all_date) {
+    } else if (has_value[col] && all_date[col]) {
       inferred_type = DataType(DataTypeId::kDate);
-    } else if (has_value && all_interval) {
+    } else if (has_value[col] && all_interval[col]) {
       inferred_type = DataType(DataTypeId::kInterval);
     }
     entrySchema->columnTypes.push_back(

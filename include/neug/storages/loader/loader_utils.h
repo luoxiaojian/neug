@@ -32,6 +32,10 @@
 
 namespace neug {
 
+namespace fsys {
+class FileSystem;
+}
+
 struct CsvSupplierRuntime;
 
 void printDiskRemaining(const std::string& path);
@@ -45,7 +49,8 @@ std::string process_header_row_token(const std::string& token, bool is_quoting,
                                      char quote_char, bool is_escaping,
                                      char escape_char);
 
-std::vector<std::string> read_header(const std::string& file_name,
+std::vector<std::string> read_header(fsys::FileSystem* file_system,
+                                     const std::string& file_name,
                                      const CsvReadConfig& config);
 
 std::vector<std::string> columnMappingsToSelectedCols(
@@ -76,6 +81,9 @@ class IDataChunkSupplier {
 class CSVChunkSupplier : public IDataChunkSupplier {
  public:
   CSVChunkSupplier(const std::string& file_path, CsvReadConfig config);
+
+  CSVChunkSupplier(fsys::FileSystem* file_system, const std::string& file_path,
+                   CsvReadConfig config);
 
   ~CSVChunkSupplier() override;
 

@@ -8,4 +8,5 @@ add_neug_test(
 	test_sniffer.cc
 	test_file_utils.cc
 	json_test.cpp
+	test_csv_io.cc
 	test_json_io.cc)

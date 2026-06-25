@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <ostream>
@@ -31,6 +32,8 @@
 #include "neug/execution/common/columns/columns_utils.h"
 #include "neug/execution/common/types/value.h"
 #include "neug/utils/datetime_parsers.h"
+#include "neug/utils/io/stream/input_stream.h"
+#include "neug/utils/io/vfs/file_system.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/string_utils.h"
 
@@ -249,20 +252,31 @@ void append_csv_field_to_builder(
     builder->push_back_elem(
         parse_value_by_type(token, data_type, true_values, false_values));
   } catch (const std::exception& error) {
-    THROW_CONVERSION_EXCEPTION("Failed to parse CSV field, file=" + file_path +
-                               ", row=" + std::to_string(row_number) +
-                               ", column=" + column_name +
-                               ", type=" + data_type.ToString() + ", value='" +
-                               token + "', reason=" + error.what());
+    THROW_CONVERSION_EXCEPTION(
+        "Failed to parse CSV field, file=" + file_path + ", row=" +
+        std::to_string(row_number) + ", column=" + column_name +
+        ", type=" + data_type.ToString() + ", value='" + token +
+        "', reason=" + error.what());
   }
 }
 
 }  // namespace
 
+std::unique_ptr<std::istream> open_csv_input_stream(
+    fsys::FileSystem* file_system, const std::string& path) {
+  if (file_system != nullptr) {
+    return fsys::openInputAsIstream(*file_system, path);
+  }
+  return io::randomAccessToIstream(io::openLocalInputFile(path));
+}
+
 struct CsvSupplierRuntime {
-  explicit CsvSupplierRuntime(const std::string& file_path,
-                              const CsvReadConfig& config)
-      : file_path_(file_path),
+  using StreamOpener = std::function<std::unique_ptr<std::istream>()>;
+
+  CsvSupplierRuntime(std::string file_path, const CsvReadConfig& config,
+                     StreamOpener opener)
+      : file_path_(std::move(file_path)),
+        opener_(std::move(opener)),
         csv_format_(build_csv_format(config)),
         selected_column_names_(resolve_selected_column_names(config)),
         selected_column_indices_(resolve_selected_column_indices(
@@ -327,8 +341,7 @@ struct CsvSupplierRuntime {
     auto chunk = std::make_shared<execution::DataChunk>();
     for (size_t column_index = 0; column_index < builders.size();
          ++column_index) {
-      chunk->set(static_cast<int>(column_index),
-                 builders[column_index]->finish());
+      chunk->set(static_cast<int>(column_index), builders[column_index]->finish());
     }
     return chunk;
   }
@@ -338,7 +351,7 @@ struct CsvSupplierRuntime {
  private:
   void reset_reader() {
     try {
-      reader_ = std::make_unique<csv::CSVReader>(file_path_, csv_format_);
+      reader_ = std::make_unique<csv::CSVReader>(opener_(), csv_format_);
       skip_rows(*reader_);
       current_row_number_ = rows_to_skip_;
     } catch (const std::exception& error) {
@@ -356,9 +369,9 @@ struct CsvSupplierRuntime {
     }
   }
 
-  int64_t count_rows() const {
+  int64_t count_rows() {
     try {
-      csv::CSVReader counter(file_path_, csv_format_);
+      csv::CSVReader counter(opener_(), csv_format_);
       skip_rows(counter);
       int64_t count = 0;
       csv::CSVRow row;
@@ -377,6 +390,7 @@ struct CsvSupplierRuntime {
 
  private:
   std::string file_path_;
+  StreamOpener opener_;
   csv::CSVFormat csv_format_;
   std::vector<std::string> selected_column_names_;
   std::vector<size_t> selected_column_indices_;
@@ -498,45 +512,53 @@ std::string process_header_row_token(const std::string& token, bool is_quoting,
   return new_token;
 }
 
-std::vector<std::string> read_header_manual(const std::string& file_name,
+std::vector<std::string> read_header_manual(std::istream& input,
                                             char delimiter, bool is_quoting,
                                             char quote_char, bool is_escaping,
-                                            char escape_char) {
+                                            char escape_char,
+                                            const std::string& file_name) {
   std::vector<std::string> res_vec;
-  std::ifstream file(file_name);
   std::string line;
-  if (file.is_open()) {
-    if (std::getline(file, line)) {
-      std::stringstream ss(line);
-      std::string token;
-      while (std::getline(ss, token, delimiter)) {
-        size_t endpos = token.find_last_not_of(" \n\r\t");
-        if (endpos == std::string::npos) {
-          token.clear();
-        } else {
-          token.erase(endpos + 1);
-        }
-        token = process_header_row_token(token, is_quoting, quote_char,
-                                         is_escaping, escape_char);
-        res_vec.push_back(token);
+  if (std::getline(input, line)) {
+    std::stringstream ss(line);
+    std::string token;
+    while (std::getline(ss, token, delimiter)) {
+      size_t endpos = token.find_last_not_of(" \n\r\t");
+      if (endpos == std::string::npos) {
+        token.clear();
+      } else {
+        token.erase(endpos + 1);
       }
-    } else {
-      file.close();
-      THROW_IO_EXCEPTION("Fail to read header line of file: " + file_name);
+      token = process_header_row_token(token, is_quoting, quote_char,
+                                       is_escaping, escape_char);
+      res_vec.push_back(token);
     }
-    file.close();
   } else {
-    THROW_IO_EXCEPTION("Fail to open file: " + file_name);
+    THROW_IO_EXCEPTION("Fail to read header line of file: " + file_name);
   }
   return res_vec;
 }
 
-std::vector<std::string> read_header(const std::string& file_name,
+std::vector<std::string> read_header_manual(const std::string& file_name,
+                                            char delimiter, bool is_quoting,
+                                            char quote_char, bool is_escaping,
+                                            char escape_char) {
+  std::ifstream file(file_name);
+  if (!file) {
+    THROW_IO_EXCEPTION("Fail to open file: " + file_name);
+  }
+  return read_header_manual(file, delimiter, is_quoting, quote_char,
+                            is_escaping, escape_char, file_name);
+}
+
+std::vector<std::string> read_header(fsys::FileSystem* file_system,
+                                     const std::string& file_name,
                                      const CsvReadConfig& config) {
   if (config.escaping) {
-    return read_header_manual(file_name, config.delimiter, config.quoting,
+    auto input = open_csv_input_stream(file_system, file_name);
+    return read_header_manual(*input, config.delimiter, config.quoting,
                               config.quote_char, config.escaping,
-                              config.escape_char);
+                              config.escape_char, file_name);
   }
   try {
     csv::CSVFormat csv_format;
@@ -547,7 +569,8 @@ std::vector<std::string> read_header(const std::string& file_name,
       csv_format.quote(false);
     }
     csv_format.no_header();
-    csv::CSVReader reader(file_name, csv_format);
+    auto input = open_csv_input_stream(file_system, file_name);
+    csv::CSVReader reader(std::move(input), csv_format);
     csv::CSVRow row;
     if (!reader.read_row(row)) {
       THROW_IO_EXCEPTION("Fail to read header line of file: " + file_name);
@@ -586,7 +609,7 @@ void deduplicate_column_names(std::vector<std::string>& all_column_names) {
 void put_column_names_option(bool header_row, const std::string& file_path,
                              CsvReadConfig& config, size_t len) {
   if (header_row) {
-    config.column_names = read_header(file_path, config);
+    config.column_names = read_header(nullptr, file_path, config);
     deduplicate_column_names(config.column_names);
   } else {
     config.column_names.resize(len);
@@ -656,7 +679,8 @@ CsvReadConfig build_csv_read_config(
           "CSV quoting must be enabled for double quotes");
     }
     auto value = csv_options.at("DOUBLE_QUOTE");
-    config.double_quote = (value == "true" || value == "1" || value == "TRUE");
+    config.double_quote =
+        (value == "true" || value == "1" || value == "TRUE");
   }
 
   bool header_row = true;
@@ -694,8 +718,18 @@ std::vector<std::string> columnMappingsToSelectedCols(
 
 CSVChunkSupplier::CSVChunkSupplier(const std::string& file_path,
                                    CsvReadConfig config)
+    : CSVChunkSupplier(nullptr, file_path, std::move(config)) {}
+
+CSVChunkSupplier::CSVChunkSupplier(fsys::FileSystem* file_system,
+                                   const std::string& file_path,
+                                   CsvReadConfig config)
     : file_path_(file_path) {
-  runtime_ = std::make_unique<CsvSupplierRuntime>(file_path, config);
+  fsys::FileSystem* fs_ptr = file_system;
+  auto opener = [fs_ptr, path = file_path]() {
+    return open_csv_input_stream(fs_ptr, path);
+  };
+  runtime_ = std::make_unique<CsvSupplierRuntime>(file_path, config,
+                                                    std::move(opener));
   row_num_ = runtime_->row_num();
   VLOG(10) << "Finish init CSVChunkSupplier for file: " << file_path_;
 }
@@ -734,7 +768,8 @@ void fillVertexReaderMeta(
   auto cur_label_col_mapping = loading_config.GetVertexColumnMappings(v_label);
 
   if (cur_label_col_mapping.size() == 0) {
-    std::vector<std::string> vertex_property_names_copy = vertex_property_names;
+    std::vector<std::string> vertex_property_names_copy =
+        vertex_property_names;
     CHECK(vertex_property_names.size() + 1 == config.column_names.size())
         << " size in schema: " << vertex_property_names.size()
         << ", size in file: " << config.column_names.size() << ","
@@ -758,8 +793,7 @@ void fillVertexReaderMeta(
         }
         col_name = config.column_names[col_id];
       }
-      if (col_id >= 0 &&
-          col_id < static_cast<int64_t>(config.column_names.size())) {
+      if (col_id >= 0 && col_id < static_cast<int64_t>(config.column_names.size())) {
         if (col_name != config.column_names[col_id]) {
           THROW_INVALID_ARGUMENT_EXCEPTION(
               "The specified column name: " + col_name +
@@ -814,7 +848,8 @@ void fillVertexReaderMeta(
           " does not exist in the vertex column mapping, please "
           "check your configuration");
     }
-    config.column_types.insert({included_col_names[ind], DataType(pk_type)});
+    config.column_types.insert(
+        {included_col_names[ind], DataType(pk_type)});
   }
 }
 
@@ -882,8 +917,7 @@ void fillEdgeReaderMeta(label_t src_label_id, label_t dst_label_id,
         }
         col_name = config.column_names[col_id];
       }
-      if (col_id >= 0 &&
-          col_id < static_cast<int64_t>(config.column_names.size())) {
+      if (col_id >= 0 && col_id < static_cast<int64_t>(config.column_names.size())) {
         if (col_name != config.column_names[col_id]) {
           THROW_INVALID_ARGUMENT_EXCEPTION(
               "The specified column name: " + col_name +
@@ -931,10 +965,8 @@ void fillEdgeReaderMeta(label_t src_label_id, label_t dst_label_id,
     CHECK(src_dst_cols.first.size() == 1 && src_dst_cols.second.size() == 1);
     auto src_col_ind = src_dst_cols.first[0].second;
     auto dst_col_ind = src_dst_cols.second[0].second;
-    CHECK(src_col_ind >= 0 &&
-          src_col_ind < static_cast<int64_t>(config.column_names.size()));
-    CHECK(dst_col_ind >= 0 &&
-          dst_col_ind < static_cast<int64_t>(config.column_names.size()));
+    CHECK(src_col_ind >= 0 && src_col_ind < static_cast<int64_t>(config.column_names.size()));
+    CHECK(dst_col_ind >= 0 && dst_col_ind < static_cast<int64_t>(config.column_names.size()));
     config.column_types.insert(
         {config.column_names[src_col_ind], DataType(src_pk_type)});
     config.column_types.insert(
@@ -950,7 +982,8 @@ void fillEdgeReaderMeta(label_t src_label_id, label_t dst_label_id,
 void set_properties_from_context_column(
     neug::ColumnBase* col,
     const std::shared_ptr<execution::IContextColumn>& ctx_col,
-    const std::vector<vid_t>& vids, std::shared_mutex& mutex) {
+    const std::vector<vid_t>& vids,
+    std::shared_mutex& mutex) {
   // Row-by-row via get_elem()
   auto col_type = col->type();
   for (size_t k = 0; k < vids.size(); ++k) {
@@ -962,11 +995,11 @@ void set_properties_from_context_column(
       continue;
     }
     switch (col_type) {
-#define SET_TYPED_VALUE(enum_val, ctype)                  \
-  case DataTypeId::enum_val: {                            \
-    auto* typed = dynamic_cast<TypedColumn<ctype>*>(col); \
-    typed->set_value(vids[k], val.GetValue<ctype>());     \
-    break;                                                \
+#define SET_TYPED_VALUE(enum_val, ctype)                                    \
+  case DataTypeId::enum_val: {                                              \
+    auto* typed = dynamic_cast<TypedColumn<ctype>*>(col);             \
+    typed->set_value(vids[k], val.GetValue<ctype>());                       \
+    break;                                                                  \
   }
       FOR_EACH_DATA_TYPE_PRIMITIVE(SET_TYPED_VALUE)
 #undef SET_TYPED_VALUE
