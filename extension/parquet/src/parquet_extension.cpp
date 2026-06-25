@@ -18,9 +18,7 @@
 #include "neug/utils/exception/exception.h"
 
 #include "parquet_read_function.h"
-#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
 #include "parquet_export_function.h"
-#endif
 
 extern "C" {
 
@@ -32,11 +30,9 @@ void Init() {
         neug::function::ParquetReadFunction>(
         neug::catalog::CatalogEntryType::TABLE_FUNCTION_ENTRY);
 
-#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
     neug::extension::ExtensionAPI::registerFunction<
         neug::function::ExportParquetFunction>(
         neug::catalog::CatalogEntryType::TABLE_FUNCTION_ENTRY);
-#endif
 
     neug::extension::ExtensionAPI::registerExtension(
         neug::extension::ExtensionInfo{

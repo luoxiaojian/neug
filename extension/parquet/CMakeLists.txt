@@ -1,6 +1,9 @@
 # Parquet extension sources (explicit list; backends are mutually exclusive at build time).
 set(_PARQUET_COMMON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/parquet_decoder.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/parquet_encoder.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/parquet_export_writer.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/parquet_export_function.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/parquet_reader.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/parquet_sniffer.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/parquet_options.cc
@@ -8,17 +11,20 @@ set(_PARQUET_COMMON_SOURCES
 
 set(_PARQUET_NATIVE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/native_parquet_decoder.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native_parquet_encoder.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/carquet_type_converter.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/carquet_value_converter.cc)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/carquet_value_converter.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/carquet_export_type_converter.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/carquet_export_value_converter.cc)
 
 set(_PARQUET_ARROW_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/arrow_parquet_decoder.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/arrow_parquet_encoder.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/arrow_context_column.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/arrow_type_converter.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/arrow_random_access_file.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/arrow_fs_resolver.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/record_batch_supplier.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/parquet_export_function.cc)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/record_batch_supplier.cc)
 
 set(PARQUET_EXTENSION_SOURCES ${_PARQUET_COMMON_SOURCES})
 if(PARQUET_USE_ARROW)
@@ -70,7 +76,7 @@ if(PARQUET_USE_ARROW)
         ${Protobuf_LIBRARIES}
         neug)
 else()
-    target_link_libraries(neug_parquet_extension PRIVATE carquet neug)
+    target_link_libraries(neug_parquet_extension PRIVATE carquet neug ${Protobuf_LIBRARIES})
 endif()
 
 if(BUILD_TEST)

@@ -410,6 +410,9 @@ TEST_F(TableTest, StringColumnDistinguishesUnsetFromEmptyString) {
 
   string_column->set_any(1, execution::Value::STRING(std::string("")), true);
   EXPECT_TRUE(string_column->get_any(1).GetValue<std::string>().empty());
+
+  string_column->set_any(1, execution::Value(DataType::VARCHAR), true);
+  EXPECT_TRUE(string_column->get_any(1).GetValue<std::string>().empty());
   EXPECT_EQ(string_column->get_any(1).type().id(), DataTypeId::kVarchar);
   string_column->set_any(
       1, execution::Value::STRING(std::string("new value new value new value")),
