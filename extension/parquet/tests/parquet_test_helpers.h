@@ -56,5 +56,24 @@ void writeStructParquetFile(const std::string& directory,
 void writeInt96TimestampParquetFile(const std::string& directory,
                                     const std::string& filename);
 
+// Creates a Parquet file with a list column where lists have varying lengths
+// and include null elements. Used to test value_idx accumulation across lists.
+// Row 1: ["A", "B", "C"]  (3 non-null elements)
+// Row 2: ["D"]              (1 non-null element)
+// Row 3: ["E", "F"]         (2 non-null elements)
+void writeMultiListParquetFile(const std::string& directory,
+                               const std::string& filename);
+
+// Creates a Parquet file with mixed column types in a specific order:
+// tags (list<string>), id (int64), name (string)
+// Used to verify schema column ordering is preserved.
+void writeMixedColumnOrderParquetFile(const std::string& directory,
+                                      const std::string& filename);
+
+// Creates a Parquet file with a map column where one entry has a null value.
+// Row 1: {"a": "abc", "b": null}  — only the non-null entry should survive.
+void writeMapWithNullValueParquetFile(const std::string& directory,
+                                      const std::string& filename);
+
 }  // namespace test
 }  // namespace neug

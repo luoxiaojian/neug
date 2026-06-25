@@ -592,5 +592,199 @@ void writeInt96TimestampParquetFile(const std::string& directory,
 #endif
 }
 
+void writeMultiListParquetFile(const std::string& directory,
+                               const std::string& filename) {
+  const std::string filepath = joinPath(directory, filename);
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
+  auto schema = arrow::schema(
+      {arrow::field("id", arrow::int64()),
+       arrow::field("tags", arrow::list(arrow::utf8()))});
+  arrow::Int64Builder id_builder;
+  ASSERT_TRUE(id_builder.AppendValues({1, 2, 3}).ok());
+  arrow::ListBuilder list_builder(arrow::default_memory_pool(),
+                                  std::make_unique<arrow::StringBuilder>());
+  auto* str_builder =
+      static_cast<arrow::StringBuilder*>(list_builder.value_builder());
+  // Row 1: ["A", "B", "C"]
+  ASSERT_TRUE(list_builder.Append().ok());
+  ASSERT_TRUE(str_builder->Append("A").ok());
+  ASSERT_TRUE(str_builder->Append("B").ok());
+  ASSERT_TRUE(str_builder->Append("C").ok());
+  // Row 2: ["D"]
+  ASSERT_TRUE(list_builder.Append().ok());
+  ASSERT_TRUE(str_builder->Append("D").ok());
+  // Row 3: ["E", "F"]
+  ASSERT_TRUE(list_builder.Append().ok());
+  ASSERT_TRUE(str_builder->Append("E").ok());
+  ASSERT_TRUE(str_builder->Append("F").ok());
+  std::shared_ptr<arrow::Array> id_array;
+  std::shared_ptr<arrow::Array> list_array;
+  ASSERT_TRUE(id_builder.Finish(&id_array).ok());
+  ASSERT_TRUE(list_builder.Finish(&list_array).ok());
+  writeTableToParquet(filepath,
+                      arrow::Table::Make(schema, {id_array, list_array}));
+#else
+  carquet_error_t err = CARQUET_ERROR_INIT;
+  carquet_schema_t* schema = carquet_schema_create(&err);
+  ASSERT_NE(schema, nullptr);
+  ASSERT_EQ(carquet_schema_add_column(schema, "id", CARQUET_PHYSICAL_INT64,
+                                      nullptr, CARQUET_REPETITION_REQUIRED, 0,
+                                      0),
+            CARQUET_OK);
+  ASSERT_GE(carquet_schema_add_list(schema, "tags", CARQUET_PHYSICAL_BYTE_ARRAY,
+                                    nullptr, CARQUET_REPETITION_OPTIONAL, 0, 0),
+            0);
+  carquet_writer_options_t opts;
+  carquet_writer_options_init(&opts);
+  carquet_writer_t* writer =
+      carquet_writer_create(filepath.c_str(), schema, &opts, &err);
+  ASSERT_NE(writer, nullptr);
+  const int64_t ids[] = {1, 2, 3};
+  ASSERT_EQ(carquet_writer_write_batch(writer, 0, ids, 3, nullptr, nullptr),
+            CARQUET_OK);
+  // values buffer contains packed non-null elements: A, B, C, D, E, F
+  const carquet_byte_array_t tags[] = {
+      {(uint8_t*)"A", 1}, {(uint8_t*)"B", 1}, {(uint8_t*)"C", 1},
+      {(uint8_t*)"D", 1}, {(uint8_t*)"E", 1}, {(uint8_t*)"F", 1}};
+  // def_levels: 3 = list present + element present
+  const int16_t tag_def[] = {3, 3, 3, 3, 3, 3};
+  // rep_levels: 0 = first element in list, 1 = continuation
+  const int16_t tag_rep[] = {0, 1, 1, 0, 0, 1};
+  ASSERT_EQ(carquet_writer_write_batch(writer, 1, tags, 6, tag_def, tag_rep),
+            CARQUET_OK);
+  carquet_writer_close(writer);
+  carquet_schema_free(schema);
+#endif
+}
+
+void writeMixedColumnOrderParquetFile(const std::string& directory,
+                                      const std::string& filename) {
+  const std::string filepath = joinPath(directory, filename);
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
+  auto schema = arrow::schema(
+      {arrow::field("tags", arrow::list(arrow::utf8())),
+       arrow::field("id", arrow::int64()),
+       arrow::field("name", arrow::utf8())});
+  arrow::ListBuilder list_builder(arrow::default_memory_pool(),
+                                  std::make_unique<arrow::StringBuilder>());
+  auto* str_builder =
+      static_cast<arrow::StringBuilder*>(list_builder.value_builder());
+  ASSERT_TRUE(list_builder.Append().ok());
+  ASSERT_TRUE(str_builder->Append("x").ok());
+  ASSERT_TRUE(list_builder.Append().ok());
+  ASSERT_TRUE(str_builder->Append("y").ok());
+  ASSERT_TRUE(list_builder.Append().ok());
+  ASSERT_TRUE(str_builder->Append("z").ok());
+  arrow::Int64Builder id_builder;
+  ASSERT_TRUE(id_builder.AppendValues({10, 20, 30}).ok());
+  arrow::StringBuilder name_builder;
+  ASSERT_TRUE(name_builder.AppendValues({"foo", "bar", "baz"}).ok());
+  std::shared_ptr<arrow::Array> list_array;
+  std::shared_ptr<arrow::Array> id_array;
+  std::shared_ptr<arrow::Array> name_array;
+  ASSERT_TRUE(list_builder.Finish(&list_array).ok());
+  ASSERT_TRUE(id_builder.Finish(&id_array).ok());
+  ASSERT_TRUE(name_builder.Finish(&name_array).ok());
+  writeTableToParquet(
+      filepath,
+      arrow::Table::Make(schema, {list_array, id_array, name_array}));
+#else
+  carquet_error_t err = CARQUET_ERROR_INIT;
+  carquet_schema_t* schema = carquet_schema_create(&err);
+  ASSERT_NE(schema, nullptr);
+  // Column 0: tags (list<string>) — added first
+  ASSERT_GE(carquet_schema_add_list(schema, "tags", CARQUET_PHYSICAL_BYTE_ARRAY,
+                                    nullptr, CARQUET_REPETITION_OPTIONAL, 0, 0),
+            0);
+  // Column 1: id (int64) — added second
+  ASSERT_EQ(carquet_schema_add_column(schema, "id", CARQUET_PHYSICAL_INT64,
+                                      nullptr, CARQUET_REPETITION_REQUIRED, 0,
+                                      0),
+            CARQUET_OK);
+  // Column 2: name (string) — added third
+  ASSERT_EQ(carquet_schema_add_column(schema, "name", CARQUET_PHYSICAL_BYTE_ARRAY,
+                                      nullptr, CARQUET_REPETITION_REQUIRED, 0,
+                                      0),
+            CARQUET_OK);
+  carquet_writer_options_t opts;
+  carquet_writer_options_init(&opts);
+  carquet_writer_t* writer =
+      carquet_writer_create(filepath.c_str(), schema, &opts, &err);
+  ASSERT_NE(writer, nullptr);
+  // tags: [["x"], ["y"], ["z"]]
+  const carquet_byte_array_t tags[] = {
+      {(uint8_t*)"x", 1}, {(uint8_t*)"y", 1}, {(uint8_t*)"z", 1}};
+  const int16_t tag_def[] = {3, 3, 3};
+  const int16_t tag_rep[] = {0, 0, 0};
+  ASSERT_EQ(carquet_writer_write_batch(writer, 0, tags, 3, tag_def, tag_rep),
+            CARQUET_OK);
+  const int64_t ids[] = {10, 20, 30};
+  ASSERT_EQ(carquet_writer_write_batch(writer, 1, ids, 3, nullptr, nullptr),
+            CARQUET_OK);
+  const carquet_byte_array_t names[] = {
+      {(uint8_t*)"foo", 3}, {(uint8_t*)"bar", 3}, {(uint8_t*)"baz", 3}};
+  ASSERT_EQ(carquet_writer_write_batch(writer, 2, names, 3, nullptr, nullptr),
+            CARQUET_OK);
+  carquet_writer_close(writer);
+  carquet_schema_free(schema);
+#endif
+}
+
+void writeMapWithNullValueParquetFile(const std::string& directory,
+                                      const std::string& filename) {
+  const std::string filepath = joinPath(directory, filename);
+#if defined(NEUG_PARQUET_USE_ARROW) && NEUG_PARQUET_USE_ARROW
+  auto map_type = arrow::map(arrow::utf8(), arrow::utf8());
+  auto schema = arrow::schema({arrow::field("map_col", map_type)});
+  arrow::MapBuilder map_builder(arrow::default_memory_pool(),
+                                std::make_unique<arrow::StringBuilder>(),
+                                std::make_unique<arrow::StringBuilder>());
+  auto* key_builder =
+      static_cast<arrow::StringBuilder*>(map_builder.key_builder());
+  auto* item_builder =
+      static_cast<arrow::StringBuilder*>(map_builder.item_builder());
+  // Row 1: {"a": "abc", "b": null}
+  ASSERT_TRUE(map_builder.Append().ok());
+  ASSERT_TRUE(key_builder->Append("a").ok());
+  ASSERT_TRUE(item_builder->Append("abc").ok());
+  ASSERT_TRUE(key_builder->Append("b").ok());
+  ASSERT_TRUE(item_builder->AppendNull().ok());
+  std::shared_ptr<arrow::Array> map_array;
+  ASSERT_TRUE(map_builder.Finish(&map_array).ok());
+  writeTableToParquet(filepath, arrow::Table::Make(schema, {map_array}));
+#else
+  carquet_error_t err = CARQUET_ERROR_INIT;
+  carquet_schema_t* schema = carquet_schema_create(&err);
+  ASSERT_NE(schema, nullptr);
+  carquet_logical_type_t string_logical{};
+  string_logical.id = CARQUET_LOGICAL_STRING;
+  ASSERT_GE(carquet_schema_add_map(schema, "map_col", CARQUET_PHYSICAL_BYTE_ARRAY,
+                                   &string_logical, 0, CARQUET_PHYSICAL_BYTE_ARRAY,
+                                   &string_logical, 0, CARQUET_REPETITION_OPTIONAL,
+                                   0),
+            0);
+  carquet_writer_options_t opts;
+  carquet_writer_options_init(&opts);
+  carquet_writer_t* writer =
+      carquet_writer_create(filepath.c_str(), schema, &opts, &err);
+  ASSERT_NE(writer, nullptr);
+  // Keys: 2 entries, both present (key_max_def = 2)
+  const carquet_byte_array_t keys[] = {{(uint8_t*)"a", 1}, {(uint8_t*)"b", 1}};
+  const int16_t key_def[] = {2, 2};
+  const int16_t key_rep[] = {0, 1};
+  // Values: 2 logical slots, but only 1 non-null value (packed buffer)
+  // val_max_def = 3; def=3 means value present, def=2 means value null
+  const carquet_byte_array_t vals[] = {{(uint8_t*)"abc", 3}};
+  const int16_t val_def[] = {3, 2};
+  const int16_t val_rep[] = {0, 1};
+  ASSERT_EQ(carquet_writer_write_batch(writer, 0, keys, 2, key_def, key_rep),
+            CARQUET_OK);
+  ASSERT_EQ(carquet_writer_write_batch(writer, 1, vals, 2, val_def, val_rep),
+            CARQUET_OK);
+  carquet_writer_close(writer);
+  carquet_schema_free(schema);
+#endif
+}
+
 }  // namespace test
 }  // namespace neug

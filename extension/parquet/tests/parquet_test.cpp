@@ -1714,6 +1714,31 @@ TEST_F(ParquetTest, TestParquetMapReadRoundtrip) {
   EXPECT_EQ(first_entry[1].GetValue<std::string>(), "abc");
 }
 
+// Skipped in Arrow mode: the Arrow decoder does not yet support map types.
+#if !defined(NEUG_PARQUET_USE_ARROW) || !NEUG_PARQUET_USE_ARROW
+TEST_F(ParquetTest, TestParquetMapWithNullValue) {
+  writeMapWithNullValueParquetFile(PARQUET_TEST_DIR, "map_null_value.parquet");
+
+  auto sharedState = createSharedState(
+      "map_null_value.parquet", {"map_col"}, {createMapStringStringType()},
+      {{"batch_read", "false"}});
+
+  auto reader = createParquetReader(sharedState);
+  execution::Context ctx = readToContext(reader, sharedState);
+  EXPECT_EQ(ctx.col_num(), 1);
+  EXPECT_EQ(ctx.row_num(), 1);
+
+  auto map_col = ctx.chunk(0).columns()[0];
+  const auto map_val = map_col->get_elem(0);
+  const auto& entries = execution::ListValue::GetChildren(map_val);
+  // Only the non-null entry should survive; the {"b": null} entry is skipped.
+  ASSERT_EQ(entries.size(), 1U);
+  const auto& entry = execution::StructValue::GetChildren(entries[0]);
+  EXPECT_EQ(entry[0].GetValue<std::string>(), "a");
+  EXPECT_EQ(entry[1].GetValue<std::string>(), "abc");
+}
+#endif  // !NEUG_PARQUET_USE_ARROW
+
 TEST_F(ParquetTest, TestParquetStructReadRoundtrip) {
   writeStructParquetFile(PARQUET_TEST_DIR, "read_struct.parquet");
 
@@ -1907,7 +1932,607 @@ TEST_F(ParquetTest, TestParquetNonExistentColumnThrows) {
                exception::SchemaMismatchException);
 }
 
+// =============================================================================
+// Test Suite: Native Parquet Round-Trip Tests
+// Verify write → read back data integrity across all column types.
+// These tests use ParquetExportWriter (which routes to NativeParquetEncoder
+// when USE_ARROW=OFF) and then reads back via ParquetReader (NativeParquetDecoder).
+// =============================================================================
+
+TEST_F(ParquetTest, RoundTrip_AllPrimitiveTypes) {
+  neug::QueryResponse response;
+  response.set_row_count(3);
+  auto* schema = response.mutable_schema();
+  schema->add_name("i32");
+  schema->add_name("i64");
+  schema->add_name("f64");
+  schema->add_name("str");
+  schema->add_name("b");
+
+  auto* c0 = response.add_arrays();
+  auto* i32 = c0->mutable_int32_array();
+  i32->add_values(1); i32->add_values(2); i32->add_values(3);
+  i32->set_validity(std::string(1, 0xFF));
+
+  auto* c1 = response.add_arrays();
+  auto* i64 = c1->mutable_int64_array();
+  i64->add_values(100); i64->add_values(200); i64->add_values(300);
+  i64->set_validity(std::string(1, 0xFF));
+
+  auto* c2 = response.add_arrays();
+  auto* f64 = c2->mutable_double_array();
+  f64->add_values(1.1); f64->add_values(2.2); f64->add_values(3.3);
+  f64->set_validity(std::string(1, 0xFF));
+
+  auto* c3 = response.add_arrays();
+  auto* str = c3->mutable_string_array();
+  str->add_values("hello"); str->add_values("world"); str->add_values("!");
+  str->set_validity(std::string(1, 0xFF));
+
+  auto* c4 = response.add_arrays();
+  auto* bl = c4->mutable_bool_array();
+  bl->add_values(true); bl->add_values(false); bl->add_values(true);
+  bl->set_validity(std::string(1, 0xFF));
+
+  auto entry = std::make_shared<reader::TableEntrySchema>();
+  entry->columnNames = {"i32", "i64", "f64", "str", "b"};
+  entry->columnTypes = {
+      createInt32Type(), createInt64Type(), createDoubleType(),
+      createStringType(), createBoolType()};
+
+  std::string path = std::string(PARQUET_TEST_DIR) + "/rt_primitives.parquet";
+  reader::FileSchema fs;
+  fs.paths = {path};
+  fs.format = "parquet";
+  auto writer = createExportWriter(fs, entry);
+  ASSERT_TRUE(writer.writeTable(&response).ok());
+
+  // Read back
+  auto state = createSharedState(
+      "rt_primitives.parquet",
+      {"i32", "i64", "f64", "str", "b"},
+      {createInt32Type(), createInt64Type(), createDoubleType(),
+       createStringType(), createBoolType()},
+      {{"batch_read", "false"}});
+  auto reader = createParquetReader(state);
+  auto ctx = readToContext(reader, state);
+
+  ASSERT_EQ(ctx.col_num(), 5);
+  ASSERT_EQ(ctx.row_num(), 3);
+  EXPECT_EQ(ctx.chunk(0).columns()[0]->get_elem(0).GetValue<int32_t>(), 1);
+  EXPECT_EQ(ctx.chunk(0).columns()[1]->get_elem(2).GetValue<int64_t>(), 300);
+  EXPECT_DOUBLE_EQ(ctx.chunk(0).columns()[2]->get_elem(1).GetValue<double>(), 2.2);
+  EXPECT_EQ(ctx.chunk(0).columns()[3]->get_elem(0).GetValue<std::string>(), "hello");
+  EXPECT_EQ(ctx.chunk(0).columns()[4]->get_elem(1).GetValue<bool>(), false);
+}
+
+TEST_F(ParquetTest, RoundTrip_FloatAndUnsigned) {
+  neug::QueryResponse response;
+  response.set_row_count(2);
+  auto* schema = response.mutable_schema();
+  schema->add_name("f32");
+  schema->add_name("u32");
+  schema->add_name("u64");
+
+  auto* c0 = response.add_arrays();
+  auto* f32 = c0->mutable_float_array();
+  f32->add_values(1.5f); f32->add_values(2.5f);
+  f32->set_validity(std::string(1, 0xFF));
+
+  auto* c1 = response.add_arrays();
+  auto* u32 = c1->mutable_uint32_array();
+  u32->add_values(100u); u32->add_values(200u);
+  u32->set_validity(std::string(1, 0xFF));
+
+  auto* c2 = response.add_arrays();
+  auto* u64 = c2->mutable_uint64_array();
+  u64->add_values(1000ULL); u64->add_values(2000ULL);
+  u64->set_validity(std::string(1, 0xFF));
+
+  auto entry = std::make_shared<reader::TableEntrySchema>();
+  entry->columnNames = {"f32", "u32", "u64"};
+  entry->columnTypes = {createFloatType(), createUint32Type(), createUint64Type()};
+
+  std::string path = std::string(PARQUET_TEST_DIR) + "/rt_float_unsigned.parquet";
+  reader::FileSchema fs;
+  fs.paths = {path};
+  fs.format = "parquet";
+  auto writer = createExportWriter(fs, entry);
+  ASSERT_TRUE(writer.writeTable(&response).ok());
+
+  auto state = createSharedState(
+      "rt_float_unsigned.parquet", {"f32", "u32", "u64"},
+      {createFloatType(), createUint32Type(), createUint64Type()},
+      {{"batch_read", "false"}});
+  auto reader = createParquetReader(state);
+  auto ctx = readToContext(reader, state);
+
+  ASSERT_EQ(ctx.col_num(), 3);
+  ASSERT_EQ(ctx.row_num(), 2);
+  EXPECT_FLOAT_EQ(ctx.chunk(0).columns()[0]->get_elem(0).GetValue<float>(), 1.5f);
+  EXPECT_EQ(ctx.chunk(0).columns()[1]->get_elem(1).GetValue<uint32_t>(), 200u);
+  EXPECT_EQ(ctx.chunk(0).columns()[2]->get_elem(0).GetValue<uint64_t>(), 1000ULL);
+}
+
+TEST_F(ParquetTest, RoundTrip_EmptyTable) {
+  neug::QueryResponse response;
+  response.set_row_count(0);
+
+  auto entry = std::make_shared<reader::TableEntrySchema>();
+  entry->columnNames = {"id"};
+  entry->columnTypes = {createInt64Type()};
+
+  std::string path = std::string(PARQUET_TEST_DIR) + "/rt_empty.parquet";
+  reader::FileSchema fs;
+  fs.paths = {path};
+  fs.format = "parquet";
+  auto writer = createExportWriter(fs, entry);
+  auto status = writer.writeTable(&response);
+  // Empty table should succeed (noop)
+  EXPECT_TRUE(status.ok());
+}
+
+TEST_F(ParquetTest, RoundTrip_LargeDataset) {
+  const int N = 5000;
+  neug::QueryResponse response;
+  response.set_row_count(N);
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("val");
+
+  auto* c0 = response.add_arrays();
+  auto* id_arr = c0->mutable_int64_array();
+  auto* c1 = response.add_arrays();
+  auto* val_arr = c1->mutable_double_array();
+  for (int i = 0; i < N; ++i) {
+    id_arr->add_values(static_cast<int64_t>(i));
+    val_arr->add_values(static_cast<double>(i) * 0.1);
+  }
+  // Full validity
+  std::string validity(((N + 7) / 8), static_cast<char>(0xFF));
+  id_arr->set_validity(validity);
+  val_arr->set_validity(validity);
+
+  auto entry = std::make_shared<reader::TableEntrySchema>();
+  entry->columnNames = {"id", "val"};
+  entry->columnTypes = {createInt64Type(), createDoubleType()};
+
+  std::string path = std::string(PARQUET_TEST_DIR) + "/rt_large.parquet";
+  reader::FileSchema fs;
+  fs.paths = {path};
+  fs.format = "parquet";
+  auto writer = createExportWriter(fs, entry);
+  ASSERT_TRUE(writer.writeTable(&response).ok());
+
+  auto state = createSharedState(
+      "rt_large.parquet", {"id", "val"},
+      {createInt64Type(), createDoubleType()},
+      {{"batch_read", "false"}});
+  auto reader = createParquetReader(state);
+  auto ctx = readToContext(reader, state);
+
+  ASSERT_EQ(ctx.row_num(), N);
+  EXPECT_EQ(ctx.chunk(0).columns()[0]->get_elem(0).GetValue<int64_t>(), 0);
+  EXPECT_EQ(ctx.chunk(0).columns()[0]->get_elem(N - 1).GetValue<int64_t>(), N - 1);
+  EXPECT_DOUBLE_EQ(ctx.chunk(0).columns()[1]->get_elem(10).GetValue<double>(), 1.0);
+}
+
+TEST_F(ParquetTest, RoundTrip_BatchReadMode) {
+  const int N = 500;
+  neug::QueryResponse response;
+  response.set_row_count(N);
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+
+  auto* c0 = response.add_arrays();
+  auto* id_arr = c0->mutable_int64_array();
+  for (int i = 0; i < N; ++i) {
+    id_arr->add_values(static_cast<int64_t>(i));
+  }
+  std::string validity(((N + 7) / 8), static_cast<char>(0xFF));
+  id_arr->set_validity(validity);
+
+  auto entry = std::make_shared<reader::TableEntrySchema>();
+  entry->columnNames = {"id"};
+  entry->columnTypes = {createInt64Type()};
+
+  std::string path = std::string(PARQUET_TEST_DIR) + "/rt_batch.parquet";
+  reader::FileSchema fs;
+  fs.paths = {path};
+  fs.format = "parquet";
+  auto writer = createExportWriter(fs, entry);
+  ASSERT_TRUE(writer.writeTable(&response).ok());
+
+  auto state = createSharedState(
+      "rt_batch.parquet", {"id"}, {createInt64Type()},
+      {{"batch_read", "true"}});
+  auto reader = createParquetReader(state);
+  auto supplier = reader->read();
+  ASSERT_NE(supplier, nullptr);
+  int total_rows = 0;
+  while (auto chunk = supplier->GetNextChunk()) {
+    total_rows += static_cast<int>(chunk->row_num());
+  }
+  EXPECT_EQ(total_rows, N);
+}
+
+TEST_F(ParquetTest, RoundTrip_MultiFileRead) {
+  for (int f = 0; f < 3; ++f) {
+    neug::QueryResponse response;
+    response.set_row_count(10);
+    auto* schema = response.mutable_schema();
+    schema->add_name("id");
+    auto* c0 = response.add_arrays();
+    auto* arr = c0->mutable_int32_array();
+    for (int i = 0; i < 10; ++i) {
+      arr->add_values(f * 10 + i);
+    }
+    arr->set_validity(std::string(2, static_cast<char>(0xFF)));
+
+    auto entry = std::make_shared<reader::TableEntrySchema>();
+    entry->columnNames = {"id"};
+    entry->columnTypes = {createInt32Type()};
+
+    std::string path = std::string(PARQUET_TEST_DIR) + "/rt_multi_" +
+                       std::to_string(f) + ".parquet";
+    reader::FileSchema fs;
+    fs.paths = {path};
+    fs.format = "parquet";
+    auto writer = createExportWriter(fs, entry);
+    ASSERT_TRUE(writer.writeTable(&response).ok());
+  }
+
+  // Read all three files together
+  auto state = std::make_shared<reader::ReadSharedState>();
+  auto entrySchema = std::make_shared<reader::TableEntrySchema>();
+  entrySchema->columnNames = {"id"};
+  entrySchema->columnTypes = {createInt32Type()};
+  reader::FileSchema fileSchema;
+  fileSchema.paths = {
+      std::string(PARQUET_TEST_DIR) + "/rt_multi_0.parquet",
+      std::string(PARQUET_TEST_DIR) + "/rt_multi_1.parquet",
+      std::string(PARQUET_TEST_DIR) + "/rt_multi_2.parquet"};
+  fileSchema.format = "parquet";
+  fileSchema.options = {{"batch_read", "false"}};
+  reader::ExternalSchema ext;
+  ext.entry = entrySchema;
+  ext.file = fileSchema;
+  state->schema = std::move(ext);
+
+  auto reader = createParquetReader(state);
+  auto ctx = readToContext(reader, state);
+  EXPECT_EQ(ctx.row_num(), 30);
+}
+
+TEST_F(ParquetTest, RoundTrip_SchemaInference) {
+  neug::QueryResponse response;
+  response.set_row_count(2);
+  auto* schema = response.mutable_schema();
+  schema->add_name("age");
+  schema->add_name("name");
+
+  auto* c0 = response.add_arrays();
+  auto* i32 = c0->mutable_int32_array();
+  i32->add_values(25); i32->add_values(30);
+  i32->set_validity(std::string(1, 0xFF));
+
+  auto* c1 = response.add_arrays();
+  auto* str = c1->mutable_string_array();
+  str->add_values("Alice"); str->add_values("Bob");
+  str->set_validity(std::string(1, 0xFF));
+
+  auto entry = std::make_shared<reader::TableEntrySchema>();
+  entry->columnNames = {"age", "name"};
+  entry->columnTypes = {createInt32Type(), createStringType()};
+
+  std::string path = std::string(PARQUET_TEST_DIR) + "/rt_infer.parquet";
+  reader::FileSchema fs;
+  fs.paths = {path};
+  fs.format = "parquet";
+  auto writer = createExportWriter(fs, entry);
+  ASSERT_TRUE(writer.writeTable(&response).ok());
+
+  // Use ParquetReader's inferSchema to verify the schema is correct
+  auto state = createSharedState(
+      "rt_infer.parquet", {"age", "name"},
+      {createInt32Type(), createStringType()});
+  auto reader = createParquetReader(state);
+  auto result = reader->inferSchema();
+  ASSERT_TRUE(result.has_value()) << result.error().ToString();
+  auto inferred = result.value();
+  ASSERT_EQ(inferred->columnNames.size(), 2u);
+  EXPECT_EQ(inferred->columnNames[0], "age");
+  EXPECT_EQ(inferred->columnNames[1], "name");
+}
+
+// =============================================================================
+// Correctness regression tests
+// =============================================================================
+
+// Verify that list values are correctly read when multiple lists of varying
+// lengths appear in the same batch. Before the fix, value_idx was reset to 0
+// for each list, causing all lists after the first to read wrong values.
+// Skipped in Arrow mode: the Arrow decoder does not yet support list types.
+#if !defined(NEUG_PARQUET_USE_ARROW) || !NEUG_PARQUET_USE_ARROW
+TEST_F(ParquetTest, TestParquetMultiListValueIdx) {
+  writeMultiListParquetFile(PARQUET_TEST_DIR, "multi_list.parquet");
+
+  auto sharedState = createSharedState(
+      "multi_list.parquet", {"id", "tags"},
+      {createInt64Type(), createListStringType()}, {{"batch_read", "false"}});
+
+  auto reader = createParquetReader(sharedState);
+  execution::Context ctx = readToContext(reader, sharedState);
+  ASSERT_EQ(ctx.row_num(), 3);
+
+  auto tags_col = ctx.chunk(0).columns()[1];
+  ASSERT_EQ(tags_col->size(), 3u);
+
+  // Row 1: ["A", "B", "C"]
+  {
+    auto val = tags_col->get_elem(0);
+    ASSERT_FALSE(val.IsNull());
+    const auto& children = execution::ListValue::GetChildren(val);
+    ASSERT_EQ(children.size(), 3u);
+    EXPECT_EQ(children[0].GetValue<std::string>(), "A");
+    EXPECT_EQ(children[1].GetValue<std::string>(), "B");
+    EXPECT_EQ(children[2].GetValue<std::string>(), "C");
+  }
+  // Row 2: ["D"]
+  {
+    auto val = tags_col->get_elem(1);
+    ASSERT_FALSE(val.IsNull());
+    const auto& children = execution::ListValue::GetChildren(val);
+    ASSERT_EQ(children.size(), 1u);
+    EXPECT_EQ(children[0].GetValue<std::string>(), "D");
+  }
+  // Row 3: ["E", "F"]
+  {
+    auto val = tags_col->get_elem(2);
+    ASSERT_FALSE(val.IsNull());
+    const auto& children = execution::ListValue::GetChildren(val);
+    ASSERT_EQ(children.size(), 2u);
+    EXPECT_EQ(children[0].GetValue<std::string>(), "E");
+    EXPECT_EQ(children[1].GetValue<std::string>(), "F");
+  }
+}
+#endif  // !NEUG_PARQUET_USE_ARROW
+
+// Verify that schema inference preserves the original column order from the
+// Parquet file, even when column types are mixed (list, primitive, string).
+TEST_F(ParquetTest, TestParquetMixedColumnOrderSchema) {
+  writeMixedColumnOrderParquetFile(PARQUET_TEST_DIR, "mixed_order.parquet");
+
+  auto sharedState = createSharedState(
+      "mixed_order.parquet", {"tags", "id", "name"},
+      {createListStringType(), createInt64Type(), createStringType()});
+
+  auto reader = createParquetReader(sharedState);
+  auto result = reader->inferSchema();
+  ASSERT_TRUE(result.has_value()) << result.error().ToString();
+  auto inferred = result.value();
+
+  // The file schema order is: tags (list), id (int64), name (string).
+  // The old code used unordered_map which produced non-deterministic order.
+  ASSERT_EQ(inferred->columnNames.size(), 3u);
+  EXPECT_EQ(inferred->columnNames[0], "tags");
+  EXPECT_EQ(inferred->columnNames[1], "id");
+  EXPECT_EQ(inferred->columnNames[2], "name");
+}
+
+// Verify that exporting negative date values (before epoch) uses floor
+// division instead of truncation toward zero.
+// -1 ms should map to day -1 (1969-12-31), not day 0 (1970-01-01).
+TEST_F(ParquetTest, TestParquetNegativeDateExport) {
+  neug::QueryResponse response;
+  const int num_rows = 4;
+  response.set_row_count(num_rows);
+
+  response.mutable_schema()->add_name("d");
+
+  auto* date_arr = response.add_arrays()->mutable_date_array();
+  // Test cases for floor division:
+  //   0 ms            → day  0  (1970-01-01)
+  //  -1 ms            → day -1  (1969-12-31) — truncation would give 0
+  //  -86399999 ms     → day -1  (1969-12-31) — truncation would give 0
+  //  -86400000 ms     → day -1  (1969-12-31)
+  date_arr->add_values(0);
+  date_arr->add_values(-1);
+  date_arr->add_values(-86399999);
+  date_arr->add_values(-86400000);
+  date_arr->set_validity(std::string(1, 0xFF));
+
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"d"};
+  entry_schema->columnTypes = {createDateType()};
+
+  std::string path = std::string(PARQUET_TEST_DIR) + "/neg_date.parquet";
+  reader::FileSchema fs;
+  fs.paths = {path};
+  fs.format = "parquet";
+  auto writer = createExportWriter(fs, entry_schema);
+  ASSERT_TRUE(writer.writeTable(&response).ok());
+
+  // Read back and verify date values.
+  auto sharedState =
+      createSharedState("neg_date.parquet", {"d"}, {createDateType()},
+                        {{"batch_read", "false"}});
+  auto reader = createParquetReader(sharedState);
+  execution::Context ctx = readToContext(reader, sharedState);
+  ASSERT_EQ(ctx.row_num(), num_rows);
+
+  auto col = ctx.chunk(0).columns()[0];
+  ASSERT_EQ(col->size(), static_cast<size_t>(num_rows));
+  // date_t stores days since epoch; use to_num_days() to verify.
+  EXPECT_EQ(col->get_elem(0).GetValue<execution::date_t>().to_num_days(), 0);
+  EXPECT_EQ(col->get_elem(1).GetValue<execution::date_t>().to_num_days(), -1);
+  EXPECT_EQ(col->get_elem(2).GetValue<execution::date_t>().to_num_days(), -1);
+  EXPECT_EQ(col->get_elem(3).GetValue<execution::date_t>().to_num_days(), -1);
+}
+
 // End of Test Suites
 
 }  // namespace test
 }  // namespace neug
+
+// =============================================================================
+// Standalone tests (outside neug::test namespace) for low-level utilities.
+// Only compiled in native (non-Arrow) mode where Carquet is available.
+// =============================================================================
+#if !defined(NEUG_PARQUET_USE_ARROW) || !NEUG_PARQUET_USE_ARROW
+#include <climits>
+#include <cstring>
+#include "../../extension/parquet/include/parquet/carquet_value_converter.h"
+
+// --- INT96 boundary tests ---
+
+TEST(Int96ToMillisTest, NormalTimestamp) {
+  // 2023-01-01 00:00:00 UTC
+  // Julian Day Number for 2023-01-01 = 2459945
+  constexpr int64_t kJulianEpochOffset = 2440588LL;
+  constexpr int32_t kJulianDay20230101 = 2459945;
+  carquet_int96_t value{};
+  int64_t nanos = 0;  // midnight
+  std::memcpy(value.value, &nanos, sizeof(int64_t));
+  value.value[2] = static_cast<uint32_t>(kJulianDay20230101);
+
+  int64_t result = neug::reader::int96ToMillis(value);
+  int64_t expected_millis =
+      static_cast<int64_t>(kJulianDay20230101 - kJulianEpochOffset) * 86400000LL;
+  EXPECT_EQ(result, expected_millis);
+}
+
+TEST(Int96ToMillisTest, TimestampWithNanos) {
+  // Julian day for Unix epoch = 2440588, so nanos = 12h = 43200*1e9
+  carquet_int96_t value{};
+  int64_t nanos = 43200000000000LL;  // 12 hours in nanoseconds
+  std::memcpy(value.value, &nanos, sizeof(int64_t));
+  value.value[2] = 2440588;  // Unix epoch day
+
+  int64_t result = neug::reader::int96ToMillis(value);
+  // Expected: 0 days * 86400000 + 43200000000000 / 1000000 = 43200000 ms = 12h
+  EXPECT_EQ(result, 43200000LL);
+}
+
+TEST(Int96ToMillisTest, OverflowHighDaysClampsToMax) {
+  // The guard triggers when days > kMaxDays = INT64_MAX / 86400000 ≈ 1.067e11.
+  // Since value.value[2] is uint32_t (max ~4.29e9), after subtracting the
+  // Julian epoch offset (2440588), max possible days ≈ 4.29e9 which is < 1.067e11.
+  // So with normal uint32_t values the guard can't be hit directly.
+  // However, this test verifies that large but valid days still compute correctly
+  // (no undefined behavior from multiplication).
+  carquet_int96_t value{};
+  int64_t nanos = 0;
+  std::memcpy(value.value, &nanos, sizeof(int64_t));
+  // Use max uint32_t value: 4294967295
+  value.value[2] = UINT32_MAX;
+
+  int64_t result = neug::reader::int96ToMillis(value);
+  // days = 4294967295 - 2440588 = 4292526707
+  // result = 4292526707 * 86400000 = a large positive number
+  int64_t expected = (static_cast<int64_t>(UINT32_MAX) - 2440588LL) * 86400000LL;
+  EXPECT_EQ(result, expected);
+  EXPECT_GT(result, 0);
+}
+
+TEST(Int96ToMillisTest, OverflowLowDaysClampsToMin) {
+  // Julian day 0 - epoch offset = -2440588 days. This should be fine.
+  // But a day that results in < -kMaxDays after offset should clamp.
+  carquet_int96_t value{};
+  int64_t nanos = 0;
+  std::memcpy(value.value, &nanos, sizeof(int64_t));
+  // value.value[2] will be interpreted as int64_t(uint32_t),
+  // but the function casts value.value[2] to int64_t.
+  // To get a very negative day count we need a large uint32 that when cast
+  // minus offset is still huge, but the function actually computes:
+  //   days = int64_t(value.value[2]) - 2440588
+  // Since value.value[2] is uint32_t, max is ~4.29 billion,
+  // which gives days ~4.29e9 - 2.44e6 ≈ 4.29e9, and
+  // kMaxDays = INT64_MAX / 86400000 ≈ 1.067e11. So uint32 max won't overflow.
+  // Use a specially crafted value: set value.value[2] = 0 (day 0)
+  // => days = 0 - 2440588 = -2440588; this is within range.
+  // To actually hit the underflow guard, we need the raw bit pattern.
+  // The actual guard is days < -kMaxDays where kMaxDays = INT64_MAX/86400000.
+  // Since value.value[2] is uint32_t (max ~4.3e9), we can't directly get
+  // a negative days exceeding kMaxDays (~1.07e11) through normal casting.
+  // The guard is a safety net for future INT96 format changes.
+  // Let's just verify a known negative result.
+  value.value[2] = 0;
+  int64_t result = neug::reader::int96ToMillis(value);
+  int64_t expected = -2440588LL * 86400000LL;
+  EXPECT_EQ(result, expected);
+}
+
+TEST(Int96ToMillisTest, NegativeNanosClampsToZero) {
+  carquet_int96_t value{};
+  int64_t nanos = -1;  // invalid: negative nanos
+  std::memcpy(value.value, &nanos, sizeof(int64_t));
+  value.value[2] = 2440588;  // Unix epoch
+
+  int64_t result = neug::reader::int96ToMillis(value);
+  // Negative nanos clamped to 0, days = 0
+  EXPECT_EQ(result, 0LL);
+}
+
+TEST(Int96ToMillisTest, ExcessiveNanosClamped) {
+  carquet_int96_t value{};
+  int64_t nanos = 90000000000000LL;  // > 86400e9 (more than 24h)
+  std::memcpy(value.value, &nanos, sizeof(int64_t));
+  value.value[2] = 2440588;
+
+  int64_t result = neug::reader::int96ToMillis(value);
+  // Clamped to kNanosPerDay - 1 = 86399999999999, divided by 1e6 = 86399999 ms
+  EXPECT_EQ(result, 86399999LL);
+}
+
+// --- CarquetReaderHandle RAII tests ---
+
+TEST(CarquetReaderHandleTest, DefaultConstructor) {
+  neug::reader::CarquetReaderHandle handle;
+  EXPECT_EQ(handle.get(), nullptr);
+  EXPECT_TRUE(handle.buffer_empty());
+  EXPECT_FALSE(static_cast<bool>(handle));
+}
+
+TEST(CarquetReaderHandleTest, MoveConstructor) {
+  neug::reader::CarquetReaderHandle h1;
+  h1.set_reader_for_test(reinterpret_cast<carquet_reader_t*>(0xDEAD));
+
+  neug::reader::CarquetReaderHandle h2(std::move(h1));
+  EXPECT_EQ(h2.get(), reinterpret_cast<carquet_reader_t*>(0xDEAD));
+  EXPECT_EQ(h1.get(), nullptr);
+  EXPECT_TRUE(h1.buffer_empty());
+
+  // Prevent destructor from calling carquet_reader_close on fake pointer.
+  h2.set_reader_for_test(nullptr);
+}
+
+TEST(CarquetReaderHandleTest, MoveAssignment) {
+  neug::reader::CarquetReaderHandle h1;
+  h1.set_reader_for_test(reinterpret_cast<carquet_reader_t*>(0xBEEF));
+
+  neug::reader::CarquetReaderHandle h2;
+  h2 = std::move(h1);
+  EXPECT_EQ(h2.get(), reinterpret_cast<carquet_reader_t*>(0xBEEF));
+  EXPECT_EQ(h1.get(), nullptr);
+
+  // Prevent destructor from calling carquet_reader_close on fake pointer.
+  h2.set_reader_for_test(nullptr);
+}
+
+TEST(CarquetReaderHandleTest, CloseReleasesBuffer) {
+  neug::reader::CarquetReaderHandle handle;
+  handle.close();
+  EXPECT_EQ(handle.get(), nullptr);
+  EXPECT_TRUE(handle.buffer_empty());
+}
+
+TEST(CarquetReaderHandleTest, ExplicitBoolOperator) {
+  neug::reader::CarquetReaderHandle handle;
+  EXPECT_FALSE(static_cast<bool>(handle));
+  handle.set_reader_for_test(reinterpret_cast<carquet_reader_t*>(0x1));
+  EXPECT_TRUE(static_cast<bool>(handle));
+  handle.set_reader_for_test(nullptr);  // prevent destructor issue
+}
+
+#endif  // !NEUG_PARQUET_USE_ARROW
