@@ -43,14 +43,35 @@ else()
 endif()
 unset(_curl_search_paths)
 
-# Collect source files for extension build
-file(GLOB HTTPFS_EXTENSION_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+# --- Source file lists (split by Arrow dependency) ---
+
+# Common sources: always compiled regardless of USE_ARROW.
+set(_HTTPFS_COMMON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/s3_client.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/s3_client_config.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/s3_random_access_file.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/s3_filesystem.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/http_random_access_file.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/http_filesystem_native.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/s3_extension.cpp)
+
+# Arrow-dependent sources: only compiled when USE_ARROW=ON.
+set(_HTTPFS_ARROW_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/s3_options.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/http_filesystem.cc)
+
+set(HTTPFS_EXTENSION_SOURCES ${_HTTPFS_COMMON_SOURCES})
+if(USE_ARROW)
+    list(APPEND HTTPFS_EXTENSION_SOURCES ${_HTTPFS_ARROW_SOURCES})
+endif()
 set(HTTPFS_EXTENSION_OBJECT_FILES ${HTTPFS_EXTENSION_SOURCES})
 
 # Use the extension build system
 build_extension_lib("httpfs")
+
+# Propagate NEUG_USE_ARROW compile definition so source code can #ifdef.
+target_compile_definitions(neug_httpfs_extension PRIVATE
+    NEUG_USE_ARROW=$<BOOL:${USE_ARROW}>)
 
 # Set include directories
 target_include_directories(neug_httpfs_extension PRIVATE
@@ -59,27 +80,40 @@ target_include_directories(neug_httpfs_extension PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
     ${CURL_INCLUDE_DIRS})
 
-if(ARROW_INCLUDE_DIRS)
+if(USE_ARROW AND ARROW_INCLUDE_DIRS)
     target_include_directories(neug_httpfs_extension PRIVATE SYSTEM ${ARROW_INCLUDE_DIRS})
 endif()
 
-# The S3 filesystem support (arrow/filesystem/s3fs.h) is compiled into
-# ARROW_BASE_LIB when ARROW_S3=ON, so no additional Arrow component is needed.
-# cURL is required for HTTP/HTTPS filesystem support.
-# IMPORTANT: neug (shared library) MUST come AFTER all Arrow static archives.
-# See extension/parquet/CMakeLists.txt for detailed explanation.
-target_link_libraries(neug_httpfs_extension PRIVATE
-    ${ARROW_BASE_LIB}
-    ${ARROW_BUNDLED_DEPS_LIB}
-    ${CURL_LIBRARIES}
-    neug
-)
+if(USE_ARROW)
+    target_link_libraries(neug_httpfs_extension PRIVATE
+        ${ARROW_BASE_LIB}
+        ${ARROW_BUNDLED_DEPS_LIB}
+        ${CURL_LIBRARIES}
+        neug)
+else()
+    target_link_libraries(neug_httpfs_extension PRIVATE
+        ${CURL_LIBRARIES}
+        neug)
+endif()
 
 if(BUILD_TEST)
-    add_extension_test(NAME httpfs
-        TEST_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/tests/s3_test.cpp
-                  ${CMAKE_CURRENT_SOURCE_DIR}/tests/http_test.cpp
-        EXTRA_LINK_LIBS ${ARROW_BASE_LIB} ${CURL_LIBRARIES}
-        EXTRA_INCLUDE_DIRS ${CURL_INCLUDE_DIRS}
-    )
+    if(USE_ARROW)
+        add_extension_test(NAME httpfs
+            TEST_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/tests/s3_test.cpp
+                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/http_test.cpp
+            EXTRA_LINK_LIBS ${ARROW_BASE_LIB} ${CURL_LIBRARIES}
+            EXTRA_INCLUDE_DIRS ${CURL_INCLUDE_DIRS}
+        )
+        target_compile_definitions(httpfs_extension_test PRIVATE
+            NEUG_USE_ARROW=1)
+    else()
+        # Native-only tests (no Arrow dependency).
+        add_extension_test(NAME httpfs
+            TEST_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/tests/httpfs_native_test.cpp
+            EXTRA_LINK_LIBS ${CURL_LIBRARIES}
+            EXTRA_INCLUDE_DIRS ${CURL_INCLUDE_DIRS}
+        )
+        target_compile_definitions(httpfs_extension_test PRIVATE
+            NEUG_USE_ARROW=0)
+    endif()
 endif()

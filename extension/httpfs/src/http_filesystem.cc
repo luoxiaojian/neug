@@ -16,27 +16,31 @@
 
 #include "http_filesystem.h"
 #include "http_options.h"
+#include "http_random_access_file.h"
 
 #include <arrow/buffer.h>
 #include <arrow/filesystem/filesystem.h>
-#include <arrow/filesystem/localfs.h>
-#include <arrow/io/memory.h>
 #include <curl/curl.h>
 #include <glog/logging.h>
 #include <algorithm>
 #include <cstring>
-#include <mutex>
 #include <sstream>
-#include <thread>
-#include <chrono>
 #include "neug/utils/io/vfs/file_system.h"
 
 namespace neug {
 namespace extension {
 namespace http {
 
-// Static members initialization
-std::once_flag HTTPFileSystem::curl_init_flag_;
+namespace {
+
+arrow::Status toArrowStatus(const neug::Status& status) {
+  if (status.ok()) {
+    return arrow::Status::OK();
+  }
+  return arrow::Status::IOError(status.error_message());
+}
+
+}  // namespace
 
 // ============================================================================
 // HTTPURIComponents Implementation
@@ -104,442 +108,112 @@ std::string HTTPURIComponents::toURL() const {
 }
 
 // ============================================================================
-// CURL callback functions
-// ============================================================================
-
-namespace {
-
-// Callback for reading response directly into buffer
-size_t WriteCallbackDirect(void* contents, size_t size, size_t nmemb, void* userp) {
-  size_t real_size = size * nmemb;
-  auto* info = static_cast<std::pair<void*, size_t>*>(userp);
-  
-  size_t to_copy = std::min(real_size, info->second);
-  if (to_copy > 0) {
-    std::memcpy(info->first, contents, to_copy);
-    info->first = static_cast<uint8_t*>(info->first) + to_copy;
-    info->second -= to_copy;
-  }
-  
-  if (real_size > to_copy) {
-    // Buffer is full — signal CURL to abort the transfer so that the
-    // caller knows the data was truncated rather than silently dropped.
-    LOG(WARNING) << "WriteCallbackDirect: buffer full, aborting transfer. "
-                 << "real_size=" << real_size << ", copied=" << to_copy
-                 << ", discarding " << (real_size - to_copy) << " bytes";
-    return 0;  // returning 0 tells CURL to stop the transfer
-  }
-  
-  return real_size;
-}
-
-// Callback for HEAD requests (no body)
-size_t HeaderCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-  return size * nmemb;  // Discard headers
-}
-
-}  // anonymous namespace
-
-// ============================================================================
-// HTTPRandomAccessFile Implementation
+// HTTPRandomAccessFile (Arrow adapter)
 // ============================================================================
 
 HTTPRandomAccessFile::HTTPRandomAccessFile(
     const std::string& url,
     const common::case_insensitive_map_t<std::string>& options)
-    : url_(url),
-      options_(options),
-      curl_handle_(nullptr),
-      file_size_(-1),
-      position_(0),
-      closed_(false),
-      header_list_(nullptr) {
-  
-  // Initialize CURL handle
-  curl_handle_ = curl_easy_init();
-  if (!curl_handle_) {
-    THROW_IO_EXCEPTION("Failed to initialize CURL handle");
-  }
-  
-  // Extract authentication options
-  auto bearer_it = options_.find(HTTPConfigOptionKeys::kBearerToken);
-  if (bearer_it != options_.end()) {
-    bearer_token_ = bearer_it->second;
-  }
-  
-  auto auth_header_it = options_.find(HTTPConfigOptionKeys::kAuthorizationHeader);
-  if (auth_header_it != options_.end() && bearer_token_.empty()) {
-    custom_headers_.push_back("Authorization: " + auth_header_it->second);
-  } else if (!bearer_token_.empty()) {
-    custom_headers_.push_back("Authorization: Bearer " + bearer_token_);
-  }
-  
-  // Parse custom headers
-  auto headers_it = options_.find(HTTPConfigOptionKeys::kCustomHeaders);
-  if (headers_it != options_.end()) {
-    std::string headers_str = headers_it->second;
-    size_t pos = 0;
-    while (pos < headers_str.size()) {
-      size_t sep = headers_str.find(';', pos);
-      std::string header = (sep == std::string::npos) 
-          ? headers_str.substr(pos)
-          : headers_str.substr(pos, sep - pos);
-      
-      if (!header.empty()) {
-        custom_headers_.push_back(header);
-      }
-      
-      pos = (sep == std::string::npos) ? headers_str.size() : sep + 1;
-    }
-  }
-  
-  // Initialize file size
-  auto status = InitializeFileSize();
-  if (!status.ok()) {
-    curl_easy_cleanup(curl_handle_);
-    THROW_IO_EXCEPTION("Failed to initialize HTTP file: " + status.ToString());
-  }
-  
-}
+    : impl_(std::make_shared<HttpRandomAccessFile>(url, options)) {}
 
-HTTPRandomAccessFile::~HTTPRandomAccessFile() {
-  if (header_list_) {
-    curl_slist_free_all(header_list_);
-  }
-  if (curl_handle_) {
-    curl_easy_cleanup(curl_handle_);
-  }
-}
+HTTPRandomAccessFile::HTTPRandomAccessFile(
+    std::shared_ptr<HttpRandomAccessFile> impl)
+    : impl_(std::move(impl)) {}
 
-arrow::Status HTTPRandomAccessFile::InitializeFileSize() {
-  CURL* curl = curl_easy_init();
-  if (!curl) {
-    return arrow::Status::IOError("Failed to initialize CURL for HEAD request");
-  }
-
-  // Setup for HEAD request
-  SetupCURLHandle(curl);
-  curl_easy_setopt(curl, CURLOPT_URL, url_.c_str());
-  curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);  // HEAD request
-  curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, HeaderCallback);
-
-  CURLcode res = curl_easy_perform(curl);
-
-  if (res != CURLE_OK) {
-    curl_easy_cleanup(curl);
-    return arrow::Status::IOError("HEAD request failed: " +
-                                  std::string(curl_easy_strerror(res)));
-  }
-
-  // Check HTTP status code: non-2xx responses indicate the resource does not
-  // exist or is inaccessible.  Without this check, a 404/403 would look like
-  // a valid file because curl_easy_perform() only fails on transport errors.
-  long http_code = 0;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-  if (http_code < 200 || http_code >= 300) {
-    curl_easy_cleanup(curl);
-    return arrow::Status::IOError("HEAD request returned HTTP " +
-                                  std::to_string(http_code) + " for " + url_);
-  }
-
-  // Get Content-Length
-  double content_length = -1;
-  res = curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &content_length);
-
-  if (res == CURLE_OK && content_length >= 0) {
-    file_size_ = static_cast<int64_t>(content_length);
-    curl_easy_cleanup(curl);
-    return arrow::Status::OK();
-  }
-
-  // Content-Length not available, try a range request as fallback
-  curl_easy_cleanup(curl);
-
-  curl = curl_easy_init();
-  if (!curl) {
-    return arrow::Status::IOError("Failed to initialize CURL for RANGE request");
-  }
-  SetupCURLHandle(curl);
-  curl_easy_setopt(curl, CURLOPT_URL, url_.c_str());
-  curl_easy_setopt(curl, CURLOPT_RANGE, "0-0");  // Just read first byte
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, HeaderCallback);
-
-  res = curl_easy_perform(curl);
-  if (res != CURLE_OK) {
-    curl_easy_cleanup(curl);
-    return arrow::Status::IOError("Failed to determine file size: " +
-                                  std::string(curl_easy_strerror(res)));
-  }
-
-  // Also check HTTP status for the range request
-  http_code = 0;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-  curl_easy_cleanup(curl);
-  if (http_code < 200 || http_code >= 300) {
-    return arrow::Status::IOError("RANGE request returned HTTP " +
-                                  std::to_string(http_code) + " for " + url_);
-  }
-
-  // Size still unknown but URL is accessible
-  file_size_ = -1;
-  LOG(WARNING) << "Could not determine file size for " << url_;
-  return arrow::Status::OK();
-}
-
-void HTTPRandomAccessFile::SetupCURLHandle(CURL* curl) {
-  // Basic options
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-  
-  // IMPORTANT: Don't include headers in the body
-  // This prevents HTTP headers from being sent to the write callback
-  curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
-  
-  // SSL/TLS verification
-  auto verify_it = options_.find(HTTPConfigOptionKeys::kVerifySSL);
-  bool verify_ssl = HTTPConfigDefaults::kVerifySSLDefault;
-  if (verify_it != options_.end()) {
-    std::string v = verify_it->second;
-    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-    if (v == "true" || v == "1" || v == "yes" || v == "on") {
-      verify_ssl = true;
-    } else if (v == "false" || v == "0" || v == "no" || v == "off") {
-      verify_ssl = false;
-    } else {
-      THROW_INVALID_ARGUMENT_EXCEPTION(
-          "Invalid VERIFY_SSL value '" + verify_it->second +
-          "'. Expected 'true'/'false', '1'/'0', 'yes'/'no', or 'on'/'off'.");
-    }
-  }
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1L : 0L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
-  
-  // CA certificate file
-  auto ca_cert_it = options_.find(HTTPConfigOptionKeys::kCACertFile);
-  if (ca_cert_it != options_.end()) {
-    curl_easy_setopt(curl, CURLOPT_CAINFO, ca_cert_it->second.c_str());
-  }
-  
-  // Timeouts
-  auto connect_timeout_it = options_.find(HTTPConfigOptionKeys::kConnectTimeout);
-  int connect_timeout = HTTPConfigDefaults::kConnectTimeoutDefault;
-  if (connect_timeout_it != options_.end()) {
-    try {
-      connect_timeout = std::stoi(connect_timeout_it->second);
-    } catch (const std::exception& e) {
-      THROW_INVALID_ARGUMENT_EXCEPTION(
-          "Invalid CONNECT_TIMEOUT value: '" + connect_timeout_it->second + 
-          "'. Must be an integer. Error: " + e.what());
-    }
-  }
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connect_timeout);
-  
-  auto request_timeout_it = options_.find(HTTPConfigOptionKeys::kRequestTimeout);
-  int request_timeout = HTTPConfigDefaults::kRequestTimeoutDefault;
-  if (request_timeout_it != options_.end()) {
-    try {
-      request_timeout = std::stoi(request_timeout_it->second);
-    } catch (const std::exception& e) {
-      THROW_INVALID_ARGUMENT_EXCEPTION(
-          "Invalid REQUEST_TIMEOUT value: '" + request_timeout_it->second + 
-          "'. Must be an integer. Error: " + e.what());
-    }
-  }
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, request_timeout);
-  
-  // Proxy
-  auto proxy_it = options_.find(HTTPConfigOptionKeys::kHTTPProxy);
-  if (proxy_it != options_.end()) {
-    curl_easy_setopt(curl, CURLOPT_PROXY, proxy_it->second.c_str());
-    
-    auto proxy_user_it = options_.find(HTTPConfigOptionKeys::kHTTPProxyUsername);
-    auto proxy_pass_it = options_.find(HTTPConfigOptionKeys::kHTTPProxyPassword);
-    if (proxy_user_it != options_.end() && proxy_pass_it != options_.end()) {
-      std::string userpass = proxy_user_it->second + ":" + proxy_pass_it->second;
-      curl_easy_setopt(curl, CURLOPT_PROXYUSERPWD, userpass.c_str());
-    }
-  }
-  
-  // Custom headers
-  if (!custom_headers_.empty()) {
-    // Clear existing header list if it exists
-    if (header_list_) {
-      curl_slist_free_all(header_list_);
-      header_list_ = nullptr;
-    }
-    // Rebuild header list
-    for (const auto& header : custom_headers_) {
-      header_list_ = curl_slist_append(header_list_, header.c_str());
-    }
-  }
-  if (header_list_) {
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list_);
-  }
-}
-
-arrow::Result<int64_t> HTTPRandomAccessFile::ReadRange(int64_t offset, int64_t length, void* buffer) {
-  if (closed_) {
-    return arrow::Status::Invalid("File is closed");
-  }
-  
-  // Handle zero-length read
-  if (length == 0) {
-    return 0;
-  }
-  
-  // Setup GET request with HTTP Range header (RFC 7233)
-  curl_easy_reset(curl_handle_);
-  SetupCURLHandle(curl_handle_);
-  curl_easy_setopt(curl_handle_, CURLOPT_URL, url_.c_str());
-  
-  // Set Range header: "bytes=offset-end"
-  // IMPORTANT: CURLOPT_RANGE expects "start-end" format without "bytes="
-  // CURL will automatically add the "Range: bytes=" prefix
-  std::string range_value = std::to_string(offset) + "-" + 
-                           std::to_string(offset + length - 1);
-  curl_easy_setopt(curl_handle_, CURLOPT_RANGE, range_value.c_str());
-  
-  // Setup direct write to buffer
-  std::pair<void*, size_t> write_info{buffer, static_cast<size_t>(length)};
-  curl_easy_setopt(curl_handle_, CURLOPT_WRITEFUNCTION, WriteCallbackDirect);
-  curl_easy_setopt(curl_handle_, CURLOPT_WRITEDATA, &write_info);
-  
-  // Perform request
-  CURLcode res = curl_easy_perform(curl_handle_);
-  
-  if (res != CURLE_OK) {
-    return arrow::Status::IOError("HTTP Range request failed: " +
-                                   std::string(curl_easy_strerror(res)));
-  }
-  
-  // Verify response code
-  // 200 = OK (server doesn't support Range, sent full file)
-  // 206 = Partial Content (server supports Range, sent requested range)
-  // 416 = Range Not Satisfiable (offset beyond end of file)
-  long response_code = 0;
-  curl_easy_getinfo(curl_handle_, CURLINFO_RESPONSE_CODE, &response_code);
-  
-  // Calculate actual bytes received
-  int64_t bytes_received = length - static_cast<int64_t>(write_info.second);
-  
-  if (response_code == 416) {
-    // Range Not Satisfiable - offset is beyond end of file
-    return 0;
-  } else if (response_code == 206) {
-    // Success: server sent the requested range
-    // Return actual bytes received (may be less than requested if near EOF)
-    if (bytes_received < length) {
-      LOG(INFO) << "HTTP Range request returned partial data. "
-                << "Requested: " << length << " bytes, "
-                << "Received: " << bytes_received << " bytes";
-    }
-    return bytes_received;
-  } else if (response_code == 200) {
-    // Server doesn't support Range requests and sent the full file.
-    // We accept whatever data fitted into our buffer and warn the caller.
-    // This allows small files to work even when the server lacks Range
-    // support, while large files will naturally receive truncated data.
-    LOG(WARNING) << "Server returned 200 instead of 206 — Range requests "
-                 << "may not be supported. Received " << bytes_received
-                 << " of " << length << " requested bytes.";
-    return bytes_received;
-  } else {
-    return arrow::Status::IOError("HTTP Range request failed with status " +
-                                   std::to_string(response_code));
-  }
-}
+HTTPRandomAccessFile::~HTTPRandomAccessFile() = default;
 
 arrow::Result<int64_t> HTTPRandomAccessFile::Tell() const {
-  if (closed_) {
+  if (impl_->Closed()) {
     return arrow::Status::Invalid("File is closed");
   }
-  return position_;
+  return impl_->Tell();
 }
 
 arrow::Result<int64_t> HTTPRandomAccessFile::GetSize() {
-  if (closed_) {
+  if (impl_->Closed()) {
     return arrow::Status::Invalid("File is closed");
   }
-  return file_size_;
+  return impl_->Size();
 }
 
 arrow::Status HTTPRandomAccessFile::Seek(int64_t position) {
-  if (closed_) {
-    return arrow::Status::Invalid("File is closed");
-  }
-  if (position < 0) {
-    return arrow::Status::Invalid("Negative seek position");
-  }
-  position_ = position;
-  return arrow::Status::OK();
+  return toArrowStatus(impl_->Seek(position));
 }
 
-arrow::Result<int64_t> HTTPRandomAccessFile::ReadAt(int64_t position, int64_t nbytes, void* out) {
-  if (closed_) {
+arrow::Result<int64_t> HTTPRandomAccessFile::ReadAt(int64_t position,
+                                                    int64_t nbytes,
+                                                    void* out) {
+  if (impl_->Closed()) {
     return arrow::Status::Invalid("File is closed");
   }
-  
-  auto bytes_read_result = ReadRange(position, nbytes, out);
-  if (!bytes_read_result.ok()) {
-    return bytes_read_result.status();
+  int64_t bytes_read = 0;
+  auto status = impl_->readAt(position, nbytes, out, &bytes_read);
+  if (!status.ok()) {
+    return toArrowStatus(status);
   }
-  
-  return *bytes_read_result;
+  return bytes_read;
 }
 
 arrow::Result<std::shared_ptr<arrow::Buffer>> HTTPRandomAccessFile::ReadAt(
     int64_t position, int64_t nbytes) {
-  if (closed_) {
+  if (impl_->Closed()) {
     return arrow::Status::Invalid("File is closed");
   }
-  
-  // Handle zero-length read
   if (nbytes == 0) {
     return std::make_shared<arrow::Buffer>(nullptr, 0);
   }
-  
+
   auto buffer_result = arrow::AllocateBuffer(nbytes);
   if (!buffer_result.ok()) {
     return buffer_result.status();
   }
-  
+
   auto buffer = std::move(buffer_result).ValueOrDie();
-  auto bytes_read_result = ReadRange(position, nbytes, buffer->mutable_data());
-  if (!bytes_read_result.ok()) {
-    return bytes_read_result.status();
+  int64_t bytes_read = 0;
+  auto status =
+      impl_->readAt(position, nbytes, buffer->mutable_data(), &bytes_read);
+  if (!status.ok()) {
+    return toArrowStatus(status);
   }
-  
-  int64_t bytes_read = *bytes_read_result;
-  // Convert unique_ptr to shared_ptr and slice to actual bytes read
+
   std::shared_ptr<arrow::Buffer> shared_buffer = std::move(buffer);
   return arrow::SliceBuffer(shared_buffer, 0, bytes_read);
 }
 
 arrow::Result<int64_t> HTTPRandomAccessFile::Read(int64_t nbytes, void* out) {
-  auto result = ReadAt(position_, nbytes, out);
-  if (result.ok()) {
-    position_ += *result;
+  int64_t bytes_read = 0;
+  auto status = impl_->Read(nbytes, out, &bytes_read);
+  if (!status.ok()) {
+    return toArrowStatus(status);
   }
-  return result;
+  return bytes_read;
 }
 
-arrow::Result<std::shared_ptr<arrow::Buffer>> HTTPRandomAccessFile::Read(int64_t nbytes) {
-  auto result = ReadAt(position_, nbytes);
-  if (result.ok()) {
-    position_ += (*result)->size();
+arrow::Result<std::shared_ptr<arrow::Buffer>> HTTPRandomAccessFile::Read(
+    int64_t nbytes) {
+  if (nbytes == 0) {
+    return std::make_shared<arrow::Buffer>(nullptr, 0);
   }
-  return result;
+  auto buffer_result = arrow::AllocateBuffer(nbytes);
+  if (!buffer_result.ok()) {
+    return buffer_result.status();
+  }
+  auto buffer = std::move(buffer_result).ValueOrDie();
+  int64_t bytes_read = 0;
+  auto status =
+      impl_->Read(nbytes, buffer->mutable_data(), &bytes_read);
+  if (!status.ok()) {
+    return toArrowStatus(status);
+  }
+  std::shared_ptr<arrow::Buffer> shared_buffer = std::move(buffer);
+  return arrow::SliceBuffer(shared_buffer, 0, bytes_read);
 }
 
 arrow::Status HTTPRandomAccessFile::Close() {
-  closed_ = true;
-  return arrow::Status::OK();
+  return toArrowStatus(impl_->Close());
 }
 
-bool HTTPRandomAccessFile::closed() const {
-  return closed_;
-}
+bool HTTPRandomAccessFile::closed() const { return impl_->Closed(); }
 
 // ============================================================================
 // HTTPFileSystem Implementation
@@ -547,15 +221,7 @@ bool HTTPRandomAccessFile::closed() const {
 
 HTTPFileSystem::HTTPFileSystem(const common::case_insensitive_map_t<std::string>& options)
     : options_(options) {
-  // Initialize CURL globally exactly once (thread-safe via std::call_once)
-  std::call_once(curl_init_flag_, []() {
-    CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
-    if (res != CURLE_OK) {
-      THROW_IO_EXCEPTION("Failed to initialize CURL globally: " +
-                         std::string(curl_easy_strerror(res)));
-    }
-    LOG(INFO) << "CURL global initialization completed";
-  });
+  ensureHttpCurlGlobalInit();
 }
 
 HTTPFileSystem::HTTPFileSystem(const reader::FileSchema& schema)
@@ -728,6 +394,11 @@ HTTPFileSystem::OpenAppendStream(
 std::vector<std::string> HTTPFileSystem::glob(const std::string& path) {
   // HTTP has no directory listing or glob expansion; return path unchanged.
   return {path};
+}
+
+std::unique_ptr<io::RandomAccessFile> HTTPFileSystem::openInputFile(
+    const std::string& path) {
+  return std::make_unique<HttpRandomAccessFile>(path, options_);
 }
 
 std::shared_ptr<void> HTTPFileSystem::getArrowFileSystem() const {

@@ -16,9 +16,12 @@
 
 #pragma once
 
+#include <fnmatch.h>
+#if defined(NEUG_USE_ARROW) && NEUG_USE_ARROW
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/result.h>
-#include <fnmatch.h>
+#endif
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -40,16 +43,53 @@ namespace s3 {
  * @param pattern The glob pattern
  * @return true if the path matches the pattern
  */
-inline bool MatchGlobPattern(const std::string& text,
-                             const std::string& pattern) {
-  // flags=0: '*' matches any character including '/', '?' matches any single
-  // char
+inline bool MatchGlobPattern(const std::string& text, const std::string& pattern) {
+  // flags=0: '*' matches any character including '/', '?' matches any single char
   return fnmatch(pattern.c_str(), text.c_str(), 0) == 0;
 }
 
 /**
- * @brief Resolve glob patterns on any Arrow FileSystem
+ * @brief Resolve glob patterns against object keys returned by list_keys.
  *
+ * @param list_keys Lists object keys under list_prefix (relative to bucket).
+ * @param root Bucket name used as path prefix in out_paths.
+ * @param pattern Glob pattern relative to bucket root.
+ */
+inline void ResolvePathsWithGlobOnKeys(
+    const std::function<std::vector<std::string>(const std::string& list_prefix)>&
+        list_keys,
+    const std::string& root, const std::string& pattern,
+    std::vector<std::string>& out_paths,
+    const std::string& original_path_for_error) {
+  std::string base_dir = pattern;
+  size_t wildcard_pos = std::min({
+      base_dir.find('*'), base_dir.find('?'), base_dir.find('[')});
+
+  if (wildcard_pos != std::string::npos) {
+    size_t last_slash = base_dir.rfind('/', wildcard_pos);
+    base_dir = (last_slash != std::string::npos) ? base_dir.substr(0, last_slash)
+                                                 : "";
+  }
+
+  const auto object_keys = list_keys(base_dir);
+  int match_count = 0;
+  for (const auto& key : object_keys) {
+    if (MatchGlobPattern(key, pattern)) {
+      out_paths.push_back(root + "/" + key);
+      match_count++;
+    }
+  }
+
+  if (match_count == 0) {
+    THROW_IO_EXCEPTION("No files matched glob pattern: " +
+                       original_path_for_error);
+  }
+}
+
+#if defined(NEUG_USE_ARROW) && NEUG_USE_ARROW
+/**
+ * @brief Resolve glob patterns on any Arrow FileSystem
+ * 
  * This helper function works with any Arrow FileSystem (S3, local, etc.) by
  * providing a root prefix (e.g., bucket name for S3, empty for local)
  * and a pattern relative to that root. The helper lists files via Arrow's
@@ -58,18 +98,21 @@ inline bool MatchGlobPattern(const std::string& text,
  * @param fs Arrow FileSystem instance (S3FileSystem, LocalFileSystem, etc.)
  * @param root Root prefix (e.g., "my-bucket" for S3, "" for local paths)
  * @param pattern Glob pattern relative to root (e.g., "data/test*.parquet")
- * @param out_paths Output vector to append matched paths (in "root/relative"
- * format)
+ * @param out_paths Output vector to append matched paths (in "root/relative" format)
  * @param original_path_for_error Original user path for error messages
  */
 inline void ResolvePathsWithGlobOnFs(
-    const std::shared_ptr<arrow::fs::FileSystem>& fs, const std::string& root,
-    const std::string& pattern, std::vector<std::string>& out_paths,
+    const std::shared_ptr<arrow::fs::FileSystem>& fs,
+    const std::string& root,
+    const std::string& pattern,
+    std::vector<std::string>& out_paths,
     const std::string& original_path_for_error) {
   // Extract base directory (part before first wildcard)
   std::string base_dir = pattern;
-  size_t wildcard_pos =
-      std::min({base_dir.find('*'), base_dir.find('?'), base_dir.find('[')});
+  size_t wildcard_pos = std::min({
+      base_dir.find('*'),
+      base_dir.find('?'),
+      base_dir.find('[')});
 
   if (wildcard_pos != std::string::npos) {
     // Find last '/' before wildcard
@@ -129,6 +172,7 @@ inline void ResolvePathsWithGlobOnFs(
                        original_path_for_error);
   }
 }
+#endif  // NEUG_USE_ARROW
 
 }  // namespace s3
 }  // namespace extension

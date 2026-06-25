@@ -17,14 +17,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <glog/logging.h>
+#if defined(NEUG_USE_ARROW) && NEUG_USE_ARROW
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/s3fs.h>
+#include "s3_options.h"
+#endif
 #include "neug/compiler/main/metadata_registry.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/io/vfs/file_system.h"
 #include "s3_filesystem.h"
 #include "http_filesystem.h"
-#include "s3_options.h"
 
 namespace neug {
 namespace extension {
@@ -53,6 +55,7 @@ static void RegisterHTTPProvider() {
       << "[httpfs extension] HTTPFileSystem registered for schemes: http, https";
 }
 
+#if defined(NEUG_USE_ARROW) && NEUG_USE_ARROW
 // Finalize Arrow S3 to prevent exit crash (called at process exit)
 static void FinalizeS3OnExit() {
   try {
@@ -65,6 +68,7 @@ static void FinalizeS3OnExit() {
     LOG(ERROR) << "[s3 extension] cleanup failed: " << e.what();
   }
 }
+#endif  // NEUG_USE_ARROW
 
 }  // namespace httpfs
 }  // namespace extension
@@ -79,6 +83,7 @@ extern "C" {
  */
 void Init() {
   try {
+#if defined(NEUG_USE_ARROW) && NEUG_USE_ARROW
     // Initialize Arrow TLS/CA-bundle options eagerly at extension load time.
     // This MUST happen before any Arrow filesystem object is created (even
     // LocalFileSystem), because arrow::fs::Initialize(opts) is a one-shot
@@ -86,6 +91,7 @@ void Init() {
     // a prior Arrow init (e.g. triggered by parquet reading a local file)
     // could race and leave TLS unconfigured, resulting in curlCode 77.
     neug::extension::s3::InitializeArrowTlsOptions();
+#endif
 
     // Register S3 filesystem provider in the global registry
     neug::extension::httpfs::RegisterS3Provider();
@@ -93,8 +99,10 @@ void Init() {
     // Register HTTP/HTTPS filesystem provider
     neug::extension::httpfs::RegisterHTTPProvider();
 
+#if defined(NEUG_USE_ARROW) && NEUG_USE_ARROW
     // Register atexit handler to finalize S3 on process exit
     std::atexit(neug::extension::httpfs::FinalizeS3OnExit);
+#endif
 
     LOG(INFO) << "[httpfs extension] initialized (s3, oss, http, https)";
   } catch (const std::exception& e) {

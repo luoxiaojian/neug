@@ -15,6 +15,10 @@
  */
 
 #include "s3_options.h"
+
+// This file is only compiled when USE_ARROW=ON (Arrow-dependent sources).
+#if defined(NEUG_USE_ARROW) && NEUG_USE_ARROW
+
 #include <arrow/filesystem/filesystem.h>
 #include <glog/logging.h>
 #include <sys/stat.h>
@@ -479,3 +483,5 @@ std::string S3OptionsBuilder::extractOSSRegion(const std::string& endpoint) {
 }  // namespace s3
 }  // namespace extension
 }  // namespace neug
+
+#endif  // NEUG_USE_ARROW
