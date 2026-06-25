@@ -15,6 +15,9 @@
 
 #include "parquet/carquet_type_converter.h"
 
+#include <cstring>
+#include <unordered_map>
+
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/io/read/common/schema.h"
 #include "neug/utils/result.h"
@@ -70,6 +73,63 @@ const carquet_logical_type_t* leafLogicalType(const carquet_schema_t* schema,
     ++leaf;
   }
   return nullptr;
+}
+
+std::shared_ptr<::common::DataType> makeListType(
+    const std::shared_ptr<::common::DataType>& element_type) {
+  auto dt = std::make_shared<::common::DataType>();
+  auto* array = dt->mutable_array();
+  *array->mutable_component_type() = *element_type;
+  return dt;
+}
+
+std::shared_ptr<::common::DataType> makeMapType(
+    const std::shared_ptr<::common::DataType>& key_type,
+    const std::shared_ptr<::common::DataType>& value_type) {
+  auto dt = std::make_shared<::common::DataType>();
+  auto* map = dt->mutable_map();
+  *map->mutable_key_type() = *key_type;
+  *map->mutable_value_type() = *value_type;
+  return dt;
+}
+
+bool isListLeafPath(const char* const* path, int32_t depth) {
+  return depth >= 3 && std::strcmp(path[1], "list") == 0 &&
+         std::strcmp(path[2], "element") == 0;
+}
+
+bool isMapKeyLeafPath(const char* const* path, int32_t depth) {
+  return depth >= 3 && std::strcmp(path[1], "key_value") == 0 &&
+         std::strcmp(path[2], "key") == 0;
+}
+
+bool isMapValueLeafPath(const char* const* path, int32_t depth) {
+  return depth >= 3 && std::strcmp(path[1], "key_value") == 0 &&
+         std::strcmp(path[2], "value") == 0;
+}
+
+bool isNestedLeafPath(const char* const* path, int32_t depth) {
+  return isListLeafPath(path, depth) || isMapKeyLeafPath(path, depth) ||
+         isMapValueLeafPath(path, depth);
+}
+
+std::vector<int32_t> collectStructLeavesForTopLevel(
+    const carquet_schema_t* schema, const char* top_level_name) {
+  std::vector<int32_t> leaves;
+  const int32_t num_leaves = carquet_schema_num_columns(schema);
+  for (int32_t leaf = 0; leaf < num_leaves; ++leaf) {
+    const char* path[16];
+    const int32_t depth = carquet_schema_column_path(schema, leaf, path, 16);
+    if (depth <= 1 || path[0] == nullptr ||
+        std::strcmp(path[0], top_level_name) != 0) {
+      continue;
+    }
+    if (isNestedLeafPath(path, depth)) {
+      continue;
+    }
+    leaves.push_back(leaf);
+  }
+  return leaves;
 }
 
 }  // namespace
@@ -142,22 +202,128 @@ result<std::shared_ptr<EntrySchema>> carquetSchemaToEntrySchema(
   }
 
   auto entry_schema = std::make_shared<TableEntrySchema>();
-  const int32_t num_columns = carquet_schema_num_columns(schema);
-  entry_schema->columnNames.reserve(num_columns);
-  entry_schema->columnTypes.reserve(num_columns);
+  const int32_t num_leaves = carquet_schema_num_columns(schema);
 
-  for (int32_t i = 0; i < num_columns; ++i) {
-    const char* name = carquet_schema_column_name(schema, i);
-    if (name == nullptr) {
-      RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,
-                          "Carquet column name is null at index " +
-                              std::to_string(i));
+  // Preserve original column order by tracking first-appearance order of
+  // top-level names. Using unordered_map for iteration caused non-deterministic
+  // column ordering that did not match the file's schema.
+  struct TopLevelColumn {
+    std::string name;
+    enum class Kind { Primitive, List, Map, Struct } kind = Kind::Primitive;
+    int32_t leaf_index = -1;
+    int32_t map_key_leaf = -1;
+    int32_t map_value_leaf = -1;
+    std::vector<int32_t> struct_leaves;
+  };
+  std::vector<TopLevelColumn> columns;
+  std::unordered_map<std::string, size_t> name_to_index;
+
+  auto getOrCreate = [&](const std::string& name) -> TopLevelColumn& {
+    auto it = name_to_index.find(name);
+    if (it != name_to_index.end()) {
+      return columns[it->second];
     }
-    entry_schema->columnNames.emplace_back(name);
-    const auto physical = carquet_schema_column_type(schema, i);
-    const auto* logical = leafLogicalType(schema, i);
-    entry_schema->columnTypes.push_back(
-        carquetColumnToCommonType(physical, logical));
+    name_to_index[name] = columns.size();
+    columns.emplace_back();
+    columns.back().name = name;
+    return columns.back();
+  };
+
+  for (int32_t leaf = 0; leaf < num_leaves; ++leaf) {
+    const char* path[16];
+    const int32_t depth =
+        carquet_schema_column_path(schema, leaf, path, 16);
+    if (depth <= 0 || path[0] == nullptr) {
+      RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,
+                          "Invalid Carquet column path at leaf " +
+                              std::to_string(leaf));
+    }
+
+    const std::string top_level = path[0];
+    if (depth == 1) {
+      auto& col = getOrCreate(top_level);
+      col.kind = TopLevelColumn::Kind::Primitive;
+      col.leaf_index = leaf;
+      continue;
+    }
+    if (isListLeafPath(path, depth)) {
+      auto& col = getOrCreate(top_level);
+      col.kind = TopLevelColumn::Kind::List;
+      col.leaf_index = leaf;
+      continue;
+    }
+    if (isMapKeyLeafPath(path, depth)) {
+      auto& col = getOrCreate(top_level);
+      col.kind = TopLevelColumn::Kind::Map;
+      col.map_key_leaf = leaf;
+      continue;
+    }
+    if (isMapValueLeafPath(path, depth)) {
+      auto& col = getOrCreate(top_level);
+      col.kind = TopLevelColumn::Kind::Map;
+      col.map_value_leaf = leaf;
+      continue;
+    }
+    auto& col = getOrCreate(top_level);
+    col.kind = TopLevelColumn::Kind::Struct;
+    col.struct_leaves.push_back(leaf);
+  }
+
+  auto appendColumn = [&](const std::string& name,
+                          const std::shared_ptr<::common::DataType>& type) {
+    entry_schema->columnNames.push_back(name);
+    entry_schema->columnTypes.push_back(type);
+  };
+
+  for (const auto& col : columns) {
+    switch (col.kind) {
+    case TopLevelColumn::Kind::Primitive: {
+      const auto physical = carquet_schema_column_type(schema, col.leaf_index);
+      const auto* logical = leafLogicalType(schema, col.leaf_index);
+      appendColumn(col.name, carquetColumnToCommonType(physical, logical));
+      break;
+    }
+    case TopLevelColumn::Kind::List: {
+      const auto physical = carquet_schema_column_type(schema, col.leaf_index);
+      const auto* logical = leafLogicalType(schema, col.leaf_index);
+      appendColumn(col.name, makeListType(carquetColumnToCommonType(physical, logical)));
+      break;
+    }
+    case TopLevelColumn::Kind::Map: {
+      if (col.map_key_leaf < 0 || col.map_value_leaf < 0) {
+        RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,
+                            "Incomplete map schema for column " + col.name);
+      }
+      const auto key_type = carquetColumnToCommonType(
+          carquet_schema_column_type(schema, col.map_key_leaf),
+          leafLogicalType(schema, col.map_key_leaf));
+      const auto value_type = carquetColumnToCommonType(
+          carquet_schema_column_type(schema, col.map_value_leaf),
+          leafLogicalType(schema, col.map_value_leaf));
+      appendColumn(col.name, makeMapType(key_type, value_type));
+      break;
+    }
+    case TopLevelColumn::Kind::Struct: {
+      if (col.struct_leaves.empty()) {
+        break;
+      }
+      auto tuple_type = std::make_shared<::common::DataType>();
+      auto* tuple = tuple_type->mutable_tuple();
+      for (int32_t leaf : col.struct_leaves) {
+        const auto physical = carquet_schema_column_type(schema, leaf);
+        const auto* logical = leafLogicalType(schema, leaf);
+        auto* field = tuple->add_component_types();
+        *field = *carquetColumnToCommonType(physical, logical);
+      }
+      appendColumn(col.name, tuple_type);
+      break;
+    }
+    }
+  }
+
+  if (entry_schema->columnNames.empty()) {
+    RETURN_STATUS_ERROR(neug::StatusCode::ERR_IO_ERROR,
+                        "Carquet schema has no readable columns");
   }
 
   return entry_schema;
@@ -168,13 +334,97 @@ std::vector<int32_t> resolveCarquetColumnIndices(
   std::vector<int32_t> indices;
   indices.reserve(names.size());
   for (const auto& name : names) {
-    const int32_t idx = carquet_schema_find_column(schema, name.c_str());
+    const int32_t idx = carquetSchemaFindTopLevelColumn(schema, name.c_str());
     if (idx < 0) {
       THROW_SCHEMA_MISMATCH("Column '" + name + "' not found in Parquet file");
     }
     indices.push_back(idx);
   }
   return indices;
+}
+
+int32_t carquetSchemaFindTopLevelColumn(const carquet_schema_t* schema,
+                                        const char* name) {
+  if (schema == nullptr || name == nullptr) {
+    return -1;
+  }
+  const int32_t num_leaves = carquet_schema_num_columns(schema);
+  for (int32_t leaf = 0; leaf < num_leaves; ++leaf) {
+    const char* path[16];
+    const int32_t depth = carquet_schema_column_path(schema, leaf, path, 16);
+    if (depth > 0 && path[0] != nullptr && std::strcmp(path[0], name) == 0) {
+      return leaf;
+    }
+  }
+  return -1;
+}
+
+CarquetColumnLayout carquetClassifyLeafColumn(const carquet_schema_t* schema,
+                                              int32_t leaf_index) {
+  const char* path[16];
+  const int32_t depth =
+      carquet_schema_column_path(schema, leaf_index, path, 16);
+  if (depth <= 1) {
+    return CarquetColumnLayout::kFlat;
+  }
+  if (isListLeafPath(path, depth)) {
+    return CarquetColumnLayout::kList;
+  }
+  if (isMapKeyLeafPath(path, depth)) {
+    return CarquetColumnLayout::kMap;
+  }
+  if (isMapValueLeafPath(path, depth)) {
+    return CarquetColumnLayout::kMap;
+  }
+  return CarquetColumnLayout::kStruct;
+}
+
+std::vector<CarquetProjectedColumn> resolveCarquetProjectedColumns(
+    const carquet_schema_t* schema, const std::vector<std::string>& names) {
+  std::vector<CarquetProjectedColumn> projected;
+  projected.reserve(names.size());
+  for (const auto& name : names) {
+    const int32_t leaf = carquetSchemaFindTopLevelColumn(schema, name.c_str());
+    if (leaf < 0) {
+      THROW_SCHEMA_MISMATCH("Column '" + name + "' not found in Parquet file");
+    }
+    CarquetProjectedColumn column;
+    column.leaf_index = leaf;
+    column.layout = carquetClassifyLeafColumn(schema, leaf);
+    column.max_def_level = carquet_schema_max_def_level(schema, leaf);
+    column.max_rep_level = carquet_schema_max_rep_level(schema, leaf);
+
+    if (column.layout == CarquetColumnLayout::kMap) {
+      const char* path[16];
+      const int32_t depth = carquet_schema_column_path(schema, leaf, path, 16);
+      if (depth > 0 && path[0] != nullptr) {
+        const std::string top = path[0];
+        const int32_t num_leaves = carquet_schema_num_columns(schema);
+        for (int32_t other = 0; other < num_leaves; ++other) {
+          const char* other_path[16];
+          const int32_t other_depth =
+              carquet_schema_column_path(schema, other, other_path, 16);
+          if (other_depth <= 0 || other_path[0] == nullptr ||
+              top != other_path[0]) {
+            continue;
+          }
+          if (isMapKeyLeafPath(other_path, other_depth)) {
+            column.map_key_leaf = other;
+          } else if (isMapValueLeafPath(other_path, other_depth)) {
+            column.map_value_leaf = other;
+          }
+        }
+      }
+    }
+
+    if (column.layout == CarquetColumnLayout::kStruct) {
+      column.struct_leaf_indices =
+          collectStructLeavesForTopLevel(schema, name.c_str());
+    }
+
+    projected.push_back(column);
+  }
+  return projected;
 }
 
 }  // namespace reader

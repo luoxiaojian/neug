@@ -15,6 +15,7 @@
 
 #include "parquet/native_parquet_decoder.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
@@ -106,6 +107,12 @@ class CarquetFileChunkSupplier : public IDataChunkSupplier {
       return nullptr;
     }
     ensureOpen();
+    if (has_nested_) {
+      auto chunk = std::make_shared<execution::DataChunk>(
+          readCarquetProjectedColumns(reader_handle_.reader, projected_));
+      finished_ = true;
+      return chunk;
+    }
     if (!batch_read_) {
       auto chunk = readAllRows();
       finished_ = true;
@@ -151,11 +158,22 @@ class CarquetFileChunkSupplier : public IDataChunkSupplier {
     reader_handle_ = openCarquetReader(*fs_, path_, options_);
     row_num_ = carquet_reader_num_rows(reader_handle_.reader);
     const auto* schema = carquet_reader_schema(reader_handle_.reader);
-    column_indices_ = resolveCarquetColumnIndices(schema, read_column_names_);
+    projected_ = resolveCarquetProjectedColumns(schema, read_column_names_);
+    has_nested_ = std::any_of(
+        projected_.begin(), projected_.end(), [](const CarquetProjectedColumn& col) {
+          return col.layout != CarquetColumnLayout::kFlat;
+        });
+    column_indices_.clear();
+    column_indices_.reserve(projected_.size());
+    for (const auto& column : projected_) {
+      column_indices_.push_back(column.leaf_index);
+    }
     physical_types_ = projectedPhysicalTypes(schema, column_indices_);
     logical_types_ = projectedLogicalTypes(schema, column_indices_);
-    batch_reader_ = createBatchReader(reader_handle_.reader, options_,
-                                      read_column_names_, &thread_pool_);
+    if (!has_nested_) {
+      batch_reader_ = createBatchReader(reader_handle_.reader, options_,
+                                        read_column_names_, &thread_pool_);
+    }
   }
 
   std::shared_ptr<execution::DataChunk> readAllRows() {
@@ -195,6 +213,8 @@ class CarquetFileChunkSupplier : public IDataChunkSupplier {
   carquet_batch_reader_t* batch_reader_ = nullptr;
   carquet_thread_pool_t* thread_pool_ = nullptr;
   std::vector<int32_t> column_indices_;
+  std::vector<CarquetProjectedColumn> projected_;
+  bool has_nested_ = false;
   std::vector<carquet_physical_type_t> physical_types_;
   std::vector<const carquet_logical_type_t*> logical_types_;
 };
@@ -230,7 +250,7 @@ NativeParquetDecoder::openSuppliers(fsys::FileSystem& fs,
   const auto* schema = carquet_reader_schema(probe.reader);
   const auto read_column_names = entryColumnNames(state);
   for (const auto& name : read_column_names) {
-    if (carquet_schema_find_column(schema, name.c_str()) < 0) {
+    if (carquetSchemaFindTopLevelColumn(schema, name.c_str()) < 0) {
       closeCarquetReader(probe);
       THROW_SCHEMA_MISMATCH("Column '" + name + "' not found in Parquet file");
     }

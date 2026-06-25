@@ -44,5 +44,17 @@ void writeMultiFileParquet(const std::string& directory,
                            const std::string& filename, int start_id,
                            int count);
 
+void writeListParquetFile(const std::string& directory,
+                          const std::string& filename);
+
+void writeMapParquetFile(const std::string& directory,
+                         const std::string& filename);
+
+void writeStructParquetFile(const std::string& directory,
+                            const std::string& filename);
+
+void writeInt96TimestampParquetFile(const std::string& directory,
+                                    const std::string& filename);
+
 }  // namespace test
 }  // namespace neug

@@ -27,6 +27,18 @@
 namespace neug {
 namespace reader {
 
+enum class CarquetColumnLayout { kFlat, kList, kMap, kStruct };
+
+struct CarquetProjectedColumn {
+  int32_t leaf_index = -1;
+  CarquetColumnLayout layout = CarquetColumnLayout::kFlat;
+  int16_t max_def_level = 0;
+  int16_t max_rep_level = 0;
+  int32_t map_key_leaf = -1;
+  int32_t map_value_leaf = -1;
+  std::vector<int32_t> struct_leaf_indices;
+};
+
 const carquet_logical_type_t* carquetLeafLogicalType(
     const carquet_schema_t* schema, int32_t leaf_index);
 
@@ -37,6 +49,16 @@ std::shared_ptr<::common::DataType> carquetColumnToCommonType(
 
 result<std::shared_ptr<EntrySchema>> carquetSchemaToEntrySchema(
     const carquet_schema_t* schema);
+
+/// Resolves a top-level Parquet column name to its primary leaf index.
+int32_t carquetSchemaFindTopLevelColumn(const carquet_schema_t* schema,
+                                        const char* name);
+
+CarquetColumnLayout carquetClassifyLeafColumn(const carquet_schema_t* schema,
+                                              int32_t leaf_index);
+
+std::vector<CarquetProjectedColumn> resolveCarquetProjectedColumns(
+    const carquet_schema_t* schema, const std::vector<std::string>& names);
 
 std::vector<int32_t> resolveCarquetColumnIndices(
     const carquet_schema_t* schema, const std::vector<std::string>& names);
